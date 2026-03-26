@@ -7,8 +7,10 @@
 		<string>_rfb._tcp</string>
 		<string>_http._tcp</string>
 	</array>
+	<key>CFBundleDisplayName</key>
+	<string>PhoneClaw</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>TrollVNC uses the local network to advertise and accept VNC connections from clients on your LAN.</string>
+	<string>PhoneClaw uses the local network to advertise and accept VNC connections from clients on your LAN.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>TrollVNC</string>
+	<string>PhoneClaw VNC</string>
 	<key>items</key>
 	<array>
 
@@ -48,7 +48,7 @@
 			<key>label</key>
 			<string>Desktop Name</string>
 			<key>default</key>
-			<string>TrollVNC</string>
+			<string>PhoneClaw</string>
 			<key>placeholder</key>
 			<string>Shown to VNC clients</string>
 			<key>keyboard</key>
@@ -224,7 +224,7 @@
 			<key>key</key>
 			<string>KeepAliveSec</string>
 			<key>default</key>
-			<real>0.0</real>
+			<real>60.0</real>
 			<key>min</key>
 			<real>0.0</real>
 			<key>max</key>
@@ -252,7 +252,7 @@
 			<key>key</key>
 			<string>Scale</string>
 			<key>default</key>
-			<real>1.0</real>
+			<real>0.75</real>
 			<key>min</key>
 			<real>0.1</real>
 			<key>max</key>
@@ -661,13 +661,13 @@
 			<key>label</key>
 			<string>HTTP Port</string>
 			<key>default</key>
-			<integer>0</integer>
+			<integer>8080</integer>
 			<key>isNumeric</key>
 			<true/>
 			<key>noAutoCorrect</key>
 			<true/>
 			<key>placeholder</key>
-			<string>0</string>
+			<string>8080</string>
 		</dict>
 
  		<!-- HTTP Document Root (advanced) -->

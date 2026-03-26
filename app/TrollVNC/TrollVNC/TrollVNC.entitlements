@@ -521,8 +521,8 @@
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>com.82flex.TrollVNCApp</string>
-		<string>GXZ23M5TP2.com.82flex.TrollVNCApp</string>
+		<string>com.phoneclaw.vnc</string>
+		<string>GXZ23M5TP2.com.phoneclaw.vnc</string>
 	</array>
 	<key>platform-application</key>
 	<true/>

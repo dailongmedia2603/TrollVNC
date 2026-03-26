@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>TrollVNCPrefs</string>
     <key>CFBundleIdentifier</key>
-    <string>com.82flex.trollvncprefs</string>
+    <string>com.phoneclaw.vncprefs</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundlePackageType</key>
