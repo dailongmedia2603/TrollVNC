@@ -50,6 +50,7 @@
 #import "PSAssistiveTouchSettingsDetail.h"
 #import "STHIDEventGenerator.h"
 #import "ScreenCapturer.h"
+#import "PhoneClawAPI.h"
 
 #define LocalizedString(key, comment, bundle, table)                                                                   \
     (NSLocalizedStringFromTableInBundle((key), (table), (bundle), (comment)) ?: (key))
@@ -4741,6 +4742,21 @@ static void tvStopRfbEventThread(void) {
 static void initializeAndRunRfbServer(void) {
     rfbInitServer(gScreen);
     TVLog(@"VNC server initialized on port %d, %dx%d, name '%@'", gPort, gWidth, gHeight, gDesktopName);
+
+    // Start PhoneClaw HTTP API server
+    uint16_t apiPort = (gHttpPort > 0) ? (uint16_t)(gHttpPort + 1) : (uint16_t)(gPort + 1);
+    {
+        NSDictionary *prefs = [[NSUserDefaults standardUserDefaults] persistentDomainForName:@"com.82flex.trollvnc"];
+        NSNumber *apiPortN = [prefs objectForKey:@"ApiPort"];
+        if ([apiPortN isKindOfClass:[NSNumber class]] && apiPortN.intValue > 0) {
+            apiPort = (uint16_t)apiPortN.intValue;
+        }
+    }
+    PhoneClawAPI *api = [PhoneClawAPI sharedAPI];
+    api.screenWidth = gWidth;
+    api.screenHeight = gHeight;
+    [api startOnPort:apiPort];
+    TVLog(@"PhoneClaw API server started on port %d", apiPort);
 
     if (isRepeaterEnabled()) {
         static CFTimeInterval sRetryInterval = 0.0;
