@@ -18,12 +18,9 @@
 #import <arpa/inet.h>
 #import <unistd.h>
 
-// Forward declaration for FrontBoardServices app launch
-@interface FBSOpenApplicationService : NSObject
-+ (instancetype)sharedService;
-- (void)openApplication:(NSString *)bundleID
-             withResult:(void (^)(NSError *_Nullable error))completion;
-@end
+// SpringBoardServices launch API (available with com.apple.springboard.launchapplications entitlement)
+extern int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
+extern CFStringRef SBSApplicationLaunchingErrorString(int error);
 
 // Screen buffer access - provided by trollvncserver via setScreenBuffer
 static void *sScreenBuffer = NULL;
@@ -374,41 +371,18 @@ static NSData *screenshotJPEG(CGFloat quality) {
     NSString *bundleId = params[@"bundleId"];
     if (!bundleId) return jsonResponse(@{@"error": @"Missing bundleId"});
 
-    // Use FrontBoardServices to open app (available with entitlements)
-    __block NSString *errMsg = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            Class FBSOpenApp = NSClassFromString(@"FBSOpenApplicationService");
-            if (FBSOpenApp) {
-                id service = [FBSOpenApp performSelector:@selector(sharedService)];
-                [service performSelector:@selector(openApplication:withResult:)
-                              withObject:bundleId
-                              withObject:^(NSError *error) {
-                    if (error) errMsg = error.localizedDescription;
-                    dispatch_semaphore_signal(sem);
-                }];
-            } else {
-                // Fallback: use SpringBoardServices
-                NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"app-launch://%@", bundleId]];
-                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
-                    if (!success) errMsg = @"openURL failed";
-                    dispatch_semaphore_signal(sem);
-                }];
-            }
-        } @catch (NSException *e) {
-            errMsg = e.reason;
-            dispatch_semaphore_signal(sem);
-        }
+    __block int result = -1;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        result = SBSLaunchApplicationWithIdentifier((__bridge CFStringRef)bundleId, false);
     });
 
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
-
-    if (errMsg) {
-        return jsonResponse(@{@"error": errMsg});
+    if (result == 0) {
+        return jsonResponse(@{@"ok": @YES, @"bundleId": bundleId});
+    } else {
+        CFStringRef errStr = SBSApplicationLaunchingErrorString(result);
+        NSString *errMsg = errStr ? (__bridge NSString *)errStr : [NSString stringWithFormat:@"Launch failed (code: %d)", result];
+        return jsonResponse(@{@"error": errMsg, @"code": @(result)});
     }
-    return jsonResponse(@{@"ok": @YES, @"bundleId": bundleId});
 }
 
 - (NSData *)handleClipboardGet {

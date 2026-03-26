@@ -86,6 +86,7 @@ trollvncserver_FRAMEWORKS += UserNotifications
 trollvncserver_FRAMEWORKS += ImageIO
 
 trollvncserver_PRIVATE_FRAMEWORKS += FrontBoardServices
+trollvncserver_PRIVATE_FRAMEWORKS += SpringBoardServices
 
 ifeq ($(THEOS_DEVICE_SIMULATOR),)
 trollvncserver_PRIVATE_FRAMEWORKS += Preferences
