@@ -13,6 +13,7 @@
 
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -132,9 +133,10 @@ static NSData *screenshotJPEG(CGFloat quality) {
         dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)
     );
 
-    __weak typeof(self) weakSelf = self;
+    __weak PhoneClawAPI *weakSelf = self;
     dispatch_source_set_event_handler(_acceptSource, ^{
-        [weakSelf acceptConnection];
+        PhoneClawAPI *strongSelf = weakSelf;
+        if (strongSelf) [strongSelf acceptConnection];
     });
     dispatch_resume(_acceptSource);
     _running = YES;
