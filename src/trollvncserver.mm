@@ -4755,6 +4755,7 @@ static void initializeAndRunRfbServer(void) {
     PhoneClawAPI *api = [PhoneClawAPI sharedAPI];
     api.screenWidth = gWidth;
     api.screenHeight = gHeight;
+    [api setScreenBuffer:gFrontBuffer width:gWidth height:gHeight bytesPerPixel:gBytesPerPixel];
     [api startOnPort:apiPort];
     TVLog(@"PhoneClaw API server started on port %d", apiPort);
 

@@ -25,11 +25,11 @@
              withResult:(void (^)(NSError *_Nullable error))completion;
 @end
 
-// Forward: grab front buffer as CGImage (defined extern in trollvncserver.mm)
-extern void *gFrontBuffer;
-extern int gWidth;
-extern int gHeight;
-extern int gBytesPerPixel;
+// Screen buffer access - provided by trollvncserver via setScreenBuffer
+static void *sScreenBuffer = NULL;
+static int sScreenWidth = 0;
+static int sScreenHeight = 0;
+static int sScreenBytesPerPixel = 4;
 
 #pragma mark - Helpers
 
@@ -43,15 +43,15 @@ static NSDictionary *_Nullable parseJSON(NSData *body) {
 }
 
 static NSData *screenshotJPEG(CGFloat quality) {
-    if (!gFrontBuffer || gWidth <= 0 || gHeight <= 0) return nil;
+    if (!sScreenBuffer || sScreenWidth <= 0 || sScreenHeight <= 0) return nil;
 
-    size_t w = (size_t)gWidth;
-    size_t h = (size_t)gHeight;
-    size_t bpr = w * (size_t)gBytesPerPixel;
+    size_t w = (size_t)sScreenWidth;
+    size_t h = (size_t)sScreenHeight;
+    size_t bpr = w * (size_t)sScreenBytesPerPixel;
 
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(
-        gFrontBuffer, w, h, 8, bpr,
+        sScreenBuffer, w, h, 8, bpr,
         cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little
     );
     CGColorSpaceRelease(cs);
@@ -96,6 +96,13 @@ static NSData *screenshotJPEG(CGFloat quality) {
     _serverSocket = -1;
     _running = NO;
     return self;
+}
+
+- (void)setScreenBuffer:(void *)buffer width:(int)w height:(int)h bytesPerPixel:(int)bpp {
+    sScreenBuffer = buffer;
+    sScreenWidth = w;
+    sScreenHeight = h;
+    sScreenBytesPerPixel = bpp;
 }
 
 - (void)startOnPort:(uint16_t)port {

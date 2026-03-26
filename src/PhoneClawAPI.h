@@ -39,6 +39,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) int screenWidth;
 @property (nonatomic) int screenHeight;
 
+/// Set the screen buffer pointer for screenshot capture
+- (void)setScreenBuffer:(void *)buffer width:(int)w height:(int)h bytesPerPixel:(int)bpp;
+
 @end
 
 NS_ASSUME_NONNULL_END
