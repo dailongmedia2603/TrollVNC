@@ -13,7 +13,6 @@
 
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
-#import <MobileCoreServices/MobileCoreServices.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -63,8 +62,9 @@ static NSData *screenshotJPEG(CGFloat quality) {
     if (!img) return nil;
 
     NSMutableData *jpegData = [NSMutableData data];
+    CFStringRef jpegUTI = CFSTR("public.jpeg");
     CGImageDestinationRef dest = CGImageDestinationCreateWithData(
-        (__bridge CFMutableDataRef)jpegData, kUTTypeJPEG, 1, NULL
+        (__bridge CFMutableDataRef)jpegData, jpegUTI, 1, NULL
     );
     if (dest) {
         NSDictionary *opts = @{(__bridge NSString *)kCGImageDestinationLossyCompressionQuality: @(quality)};
