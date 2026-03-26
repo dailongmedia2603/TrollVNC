@@ -19,8 +19,8 @@
 #import <unistd.h>
 
 // SpringBoardServices launch API (available with com.apple.springboard.launchapplications entitlement)
-extern int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
-extern CFStringRef SBSApplicationLaunchingErrorString(int error);
+extern "C" int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
+extern "C" CFStringRef SBSApplicationLaunchingErrorString(int error);
 
 // Screen buffer access - provided by trollvncserver via setScreenBuffer
 static void *sScreenBuffer = NULL;
