@@ -301,7 +301,8 @@ static NSData *screenshotJPEG(CGFloat quality) {
     CGSize screen = [UIScreen mainScreen].bounds.size;
     CGPoint point = CGPointMake(x * screen.width, y * screen.height);
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    // Fire and forget - don't block response on main queue
+    dispatch_async(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] tap:point];
     });
     return jsonResponse(@{@"ok": @YES});
@@ -320,7 +321,7 @@ static NSData *screenshotJPEG(CGFloat quality) {
     CGPoint start = CGPointMake(fromX * screen.width, fromY * screen.height);
     CGPoint end = CGPointMake(toX * screen.width, toY * screen.height);
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] dragLinearWithStartPoint:start endPoint:end duration:duration];
     });
     return jsonResponse(@{@"ok": @YES});
@@ -331,7 +332,7 @@ static NSData *screenshotJPEG(CGFloat quality) {
     NSString *text = params[@"text"];
     if (!text) return jsonResponse(@{@"error": @"Missing text"});
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         for (NSUInteger i = 0; i < text.length; i++) {
             NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
             [[STHIDEventGenerator sharedGenerator] keyPress:ch];
@@ -345,7 +346,7 @@ static NSData *screenshotJPEG(CGFloat quality) {
     NSString *key = params[@"key"];
     if (!key) return jsonResponse(@{@"error": @"Missing key"});
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         STHIDEventGenerator *gen = [STHIDEventGenerator sharedGenerator];
         if ([key isEqualToString:@"home"]) {
             [gen menuPress];
