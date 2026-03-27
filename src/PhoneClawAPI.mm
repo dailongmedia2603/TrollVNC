@@ -303,21 +303,16 @@ static NSData *screenshotJPEG(CGFloat quality) {
     CGSize screen = [UIScreen mainScreen].bounds.size;
     CGPoint point = CGPointMake(x * screen.width, y * screen.height);
 
-    // Use sendTaps on main queue - must complete before response
-    __block BOOL done = NO;
+    // Reuse sendTaps (same as doubletap which works reliably)
     dispatch_async(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] sendTaps:1
                                                location:point
                                         numberOfTouches:1
-                                       delayBetweenTaps:0.0];
-        done = YES;
+                                       delayBetweenTaps:0.05];
     });
-    // Wait up to 2s for tap to complete
-    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:2.0];
-    while (!done && [[NSDate date] compare:timeout] == NSOrderedAscending) {
-        [NSThread sleepForTimeInterval:0.01];
-    }
-    return jsonResponse(@{@"ok": @(done)});
+    // Small delay to let main queue pick up the block
+    [NSThread sleepForTimeInterval:0.1];
+    return jsonResponse(@{@"ok": @YES});
 }
 
 - (NSData *)handleDoubleTap:(NSDictionary *)params {
