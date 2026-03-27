@@ -315,12 +315,18 @@ static NSData *screenshotJPEG(CGFloat quality) {
     if (!params) return jsonResponse(@{@"error": @"Missing body"});
     CGFloat x = [params[@"x"] doubleValue];
     CGFloat y = [params[@"y"] doubleValue];
+    CGFloat delay = [params[@"delay"] doubleValue];
+    if (delay <= 0) delay = 0.05;
 
     CGSize screen = [UIScreen mainScreen].bounds.size;
     CGPoint point = CGPointMake(x * screen.width, y * screen.height);
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[STHIDEventGenerator sharedGenerator] doubleTap:point];
+        // Use sendTaps for precise control: 2 taps, 1 finger, custom delay
+        [[STHIDEventGenerator sharedGenerator] sendTaps:2
+                                               location:point
+                                        numberOfTouches:1
+                                       delayBetweenTaps:delay];
     });
     return jsonResponse(@{@"ok": @YES});
 }
