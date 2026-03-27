@@ -240,6 +240,9 @@ static NSData *screenshotJPEG(CGFloat quality) {
     else if ([path isEqualToString:@"/api/key"] && [method isEqualToString:@"POST"]) {
         responseBody = [self handleKey:parseJSON(bodyData)];
     }
+    else if ([path isEqualToString:@"/api/doubletap"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleDoubleTap:parseJSON(bodyData)];
+    }
     else if ([path isEqualToString:@"/api/launch"] && [method isEqualToString:@"POST"]) {
         responseBody = [self handleLaunch:parseJSON(bodyData)];
     }
@@ -304,6 +307,20 @@ static NSData *screenshotJPEG(CGFloat quality) {
     // Fire and forget - don't block response on main queue
     dispatch_async(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] tap:point];
+    });
+    return jsonResponse(@{@"ok": @YES});
+}
+
+- (NSData *)handleDoubleTap:(NSDictionary *)params {
+    if (!params) return jsonResponse(@{@"error": @"Missing body"});
+    CGFloat x = [params[@"x"] doubleValue];
+    CGFloat y = [params[@"y"] doubleValue];
+
+    CGSize screen = [UIScreen mainScreen].bounds.size;
+    CGPoint point = CGPointMake(x * screen.width, y * screen.height);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[STHIDEventGenerator sharedGenerator] doubleTap:point];
     });
     return jsonResponse(@{@"ok": @YES});
 }
