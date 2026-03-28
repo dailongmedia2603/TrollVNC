@@ -11,6 +11,10 @@
 	<string>Phone Agent</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PhoneClaw uses the local network to advertise and accept VNC connections from clients on your LAN.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Phone Agent cần quyền truy cập Photos để lưu video từ dashboard.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Phone Agent cần quyền truy cập Photos để lưu video từ dashboard.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
