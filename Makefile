@@ -84,6 +84,7 @@ trollvncserver_FRAMEWORKS += QuartzCore
 trollvncserver_FRAMEWORKS += UIKit
 trollvncserver_FRAMEWORKS += UserNotifications
 trollvncserver_FRAMEWORKS += ImageIO
+trollvncserver_FRAMEWORKS += Photos
 
 trollvncserver_PRIVATE_FRAMEWORKS += FrontBoardServices
 trollvncserver_PRIVATE_FRAMEWORKS += SpringBoardServices

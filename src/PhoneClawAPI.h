@@ -13,6 +13,7 @@
    POST /api/launch       — {"bundleId":"com.app.id"}
    GET  /api/clipboard    — read clipboard
    POST /api/clipboard    — {"text":"..."}
+   POST /api/save-to-photos — {"url":"https://..."} download & save to Photos
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2.

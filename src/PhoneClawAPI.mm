@@ -13,6 +13,7 @@
 
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
+#import <Photos/Photos.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -252,6 +253,9 @@ static NSData *screenshotJPEG(CGFloat quality) {
     else if ([path isEqualToString:@"/api/clipboard"] && [method isEqualToString:@"POST"]) {
         responseBody = [self handleClipboardSet:parseJSON(bodyData)];
     }
+    else if ([path isEqualToString:@"/api/save-to-photos"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleSaveToPhotos:parseJSON(bodyData)];
+    }
     else {
         statusCode = 404;
         responseBody = jsonResponse(@{@"error": @"Not found"});
@@ -430,6 +434,62 @@ static NSData *screenshotJPEG(CGFloat quality) {
         [[ClipboardManager sharedManager] setString:text];
     });
     return jsonResponse(@{@"ok": @YES});
+}
+
+- (NSData *)handleSaveToPhotos:(NSDictionary *)params {
+    if (!params) return jsonResponse(@{@"error": @"Missing body"});
+    NSString *urlString = params[@"url"];
+    if (!urlString) return jsonResponse(@{@"error": @"Missing url"});
+
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return jsonResponse(@{@"error": @"Invalid url"});
+
+    // Download file to temp location
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSError *downloadError = nil;
+    __block NSURL *tempFileURL = nil;
+
+    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession]
+        downloadTaskWithURL:url
+        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+            if (error) {
+                downloadError = error;
+            } else if (location) {
+                // Move to temp with proper extension
+                NSString *ext = [[url pathExtension] length] > 0 ? [url pathExtension] : @"mp4";
+                NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"phoneclaw_%@.%@",
+                        [[NSUUID UUID] UUIDString], ext]];
+                tempFileURL = [NSURL fileURLWithPath:tempPath];
+                [[NSFileManager defaultManager] moveItemAtURL:location toURL:tempFileURL error:nil];
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC)); // 120s timeout
+
+    if (downloadError || !tempFileURL) {
+        return jsonResponse(@{@"error": downloadError ? [downloadError localizedDescription] : @"Download failed"});
+    }
+
+    // Save to Photos library
+    __block NSError *saveError = nil;
+    dispatch_semaphore_t saveSem = dispatch_semaphore_create(0);
+
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:tempFileURL];
+    } completionHandler:^(BOOL success, NSError *error) {
+        if (!success) saveError = error;
+        // Cleanup temp file
+        [[NSFileManager defaultManager] removeItemAtURL:tempFileURL error:nil];
+        dispatch_semaphore_signal(saveSem);
+    }];
+    dispatch_semaphore_wait(saveSem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+
+    if (saveError) {
+        return jsonResponse(@{@"error": [saveError localizedDescription]});
+    }
+    return jsonResponse(@{@"ok": @YES, @"message": @"Video saved to Photos"});
 }
 
 @end
