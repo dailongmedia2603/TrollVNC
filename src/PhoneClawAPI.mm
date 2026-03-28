@@ -445,8 +445,8 @@ static NSData *screenshotJPEG(CGFloat quality) {
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return jsonResponse(@{@"error": @"Invalid url"});
 
-    // Show notification on device
-    [[BulletinManager sharedManager] popBannerWithContent:@"Đang tải video..." userInfo:nil];
+    // Show silent persistent status on device (no sound, updates in place)
+    [[BulletinManager sharedManager] updateSingleBannerWithContent:@"📥 Đang tải video..." badgeCount:1 userInfo:nil];
 
     // Start download + save in background (don't block HTTP server)
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -464,9 +464,9 @@ static NSData *screenshotJPEG(CGFloat quality) {
 
         if (authStatus != PHAuthorizationStatusAuthorized) {
             NSLog(@"[PhoneClawAPI] Photos authorization denied: %ld", (long)authStatus);
-            [[BulletinManager sharedManager] popBannerWithContent:
+            [[BulletinManager sharedManager] updateSingleBannerWithContent:
                 [NSString stringWithFormat:@"❌ Quyền Photos bị từ chối (status=%ld)", (long)authStatus]
-                userInfo:nil];
+                badgeCount:0 userInfo:nil];
             return;
         }
 
@@ -499,18 +499,18 @@ static NSData *screenshotJPEG(CGFloat quality) {
                 dispatch_semaphore_signal(sem);
             }];
         [task resume];
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_SEC)); // 10 min for large videos
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 1200 * NSEC_PER_SEC)); // 20 min for large videos
 
         if (!tempFileURL) {
             NSString *errMsg = downloadError ? downloadError.localizedDescription : @"Download timeout";
             NSLog(@"[PhoneClawAPI] Download failed: %@", errMsg);
-            [[BulletinManager sharedManager] popBannerWithContent:
+            [[BulletinManager sharedManager] updateSingleBannerWithContent:
                 [NSString stringWithFormat:@"❌ Tải video thất bại: %@", errMsg]
-                userInfo:nil];
+                badgeCount:0 userInfo:nil];
             return;
         }
 
-        [[BulletinManager sharedManager] popBannerWithContent:@"Đã tải xong, đang lưu vào Photos..." userInfo:nil];
+        [[BulletinManager sharedManager] updateSingleBannerWithContent:@"💾 Đã tải xong, đang lưu vào Photos..." badgeCount:1 userInfo:nil];
 
         // Step 3: Save to Photos library
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
@@ -519,12 +519,12 @@ static NSData *screenshotJPEG(CGFloat quality) {
             [[NSFileManager defaultManager] removeItemAtURL:tempFileURL error:nil];
             if (success) {
                 NSLog(@"[PhoneClawAPI] Video saved to Photos successfully");
-                [[BulletinManager sharedManager] popBannerWithContent:@"✅ Video đã lưu vào Photos!" userInfo:nil];
+                [[BulletinManager sharedManager] updateSingleBannerWithContent:@"✅ Video đã lưu vào Photos!" badgeCount:0 userInfo:nil];
             } else {
                 NSLog(@"[PhoneClawAPI] Save to Photos failed: %@", error.localizedDescription);
-                [[BulletinManager sharedManager] popBannerWithContent:
+                [[BulletinManager sharedManager] updateSingleBannerWithContent:
                     [NSString stringWithFormat:@"❌ Lưu Photos thất bại: %@", error.localizedDescription]
-                    userInfo:nil];
+                    badgeCount:0 userInfo:nil];
             }
         }];
     });
