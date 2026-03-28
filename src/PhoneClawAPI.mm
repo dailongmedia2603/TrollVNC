@@ -499,7 +499,7 @@ static NSData *screenshotJPEG(CGFloat quality) {
                 dispatch_semaphore_signal(sem);
             }];
         [task resume];
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC));
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_SEC)); // 10 min for large videos
 
         if (!tempFileURL) {
             NSString *errMsg = downloadError ? downloadError.localizedDescription : @"Download timeout";
