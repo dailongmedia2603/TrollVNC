@@ -444,52 +444,52 @@ static NSData *screenshotJPEG(CGFloat quality) {
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return jsonResponse(@{@"error": @"Invalid url"});
 
-    // Download file to temp location
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    __block NSError *downloadError = nil;
-    __block NSURL *tempFileURL = nil;
+    // Start download + save in background (don't block HTTP server)
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSLog(@"[PhoneClawAPI] Downloading video from: %@", urlString);
 
-    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession]
-        downloadTaskWithURL:url
-        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-            if (error) {
-                downloadError = error;
-            } else if (location) {
-                // Move to temp with proper extension
-                NSString *ext = [[url pathExtension] length] > 0 ? [url pathExtension] : @"mp4";
-                NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"phoneclaw_%@.%@",
-                        [[NSUUID UUID] UUIDString], ext]];
-                tempFileURL = [NSURL fileURLWithPath:tempPath];
-                [[NSFileManager defaultManager] moveItemAtURL:location toURL:tempFileURL error:nil];
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        __block NSURL *tempFileURL = nil;
+
+        NSURLSessionDownloadTask *task = [[NSURLSession sharedSession]
+            downloadTaskWithURL:url
+            completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+                if (error) {
+                    NSLog(@"[PhoneClawAPI] Download error: %@", error.localizedDescription);
+                } else if (location) {
+                    NSString *ext = [[url pathExtension] length] > 0 ? [url pathExtension] : @"mp4";
+                    NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"phoneclaw_%@.%@",
+                            [[NSUUID UUID] UUIDString], ext]];
+                    tempFileURL = [NSURL fileURLWithPath:tempPath];
+                    [[NSFileManager defaultManager] moveItemAtURL:location toURL:tempFileURL error:nil];
+                    NSLog(@"[PhoneClawAPI] Downloaded to: %@", tempPath);
+                }
+                dispatch_semaphore_signal(sem);
+            }];
+        [task resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC));
+
+        if (!tempFileURL) {
+            NSLog(@"[PhoneClawAPI] Download failed, no temp file");
+            return;
+        }
+
+        // Save to Photos library
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:tempFileURL];
+        } completionHandler:^(BOOL success, NSError *error) {
+            [[NSFileManager defaultManager] removeItemAtURL:tempFileURL error:nil];
+            if (success) {
+                NSLog(@"[PhoneClawAPI] Video saved to Photos successfully");
+            } else {
+                NSLog(@"[PhoneClawAPI] Save to Photos failed: %@", error.localizedDescription);
             }
-            dispatch_semaphore_signal(sem);
         }];
-    [task resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC)); // 120s timeout
+    });
 
-    if (downloadError || !tempFileURL) {
-        return jsonResponse(@{@"error": downloadError ? [downloadError localizedDescription] : @"Download failed"});
-    }
-
-    // Save to Photos library
-    __block NSError *saveError = nil;
-    dispatch_semaphore_t saveSem = dispatch_semaphore_create(0);
-
-    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-        [PHAssetCreationRequest creationRequestForAssetFromVideoAtFileURL:tempFileURL];
-    } completionHandler:^(BOOL success, NSError *error) {
-        if (!success) saveError = error;
-        // Cleanup temp file
-        [[NSFileManager defaultManager] removeItemAtURL:tempFileURL error:nil];
-        dispatch_semaphore_signal(saveSem);
-    }];
-    dispatch_semaphore_wait(saveSem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
-
-    if (saveError) {
-        return jsonResponse(@{@"error": [saveError localizedDescription]});
-    }
-    return jsonResponse(@{@"ok": @YES, @"message": @"Video saved to Photos"});
+    // Return immediately — download happens in background
+    return jsonResponse(@{@"ok": @YES, @"message": @"Download started, saving to Photos..."});
 }
 
 @end
