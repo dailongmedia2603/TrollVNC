@@ -108,6 +108,24 @@ jobs:
         with:
           xcode-version: "16.2"
 
+      - name: Build sing-box for iOS arm64
+        run: |
+          # Install Go
+          brew install go
+
+          # Clone sing-box
+          git clone --depth 1 https://github.com/SagerNet/sing-box.git /tmp/sing-box
+          cd /tmp/sing-box
+
+          # Build for iOS arm64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o "$GITHUB_WORKSPACE/sing-box" \
+            ./cmd/sing-box
+
+          echo "[CI] sing-box binary built ($(du -h $GITHUB_WORKSPACE/sing-box | cut -f1))"
+
       - name: Generate Managed.plist (managed build)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.is_managed == true }}
         env:

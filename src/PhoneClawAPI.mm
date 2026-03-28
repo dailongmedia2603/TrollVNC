@@ -11,6 +11,7 @@
 #import "STHIDEventGenerator.h"
 #import "ClipboardManager.h"
 #import "BulletinManager.h"
+#import "DeviceSpoofer.h"
 
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
@@ -19,6 +20,9 @@
 #import <netinet/in.h>
 #import <arpa/inet.h>
 #import <unistd.h>
+#import <signal.h>
+#import <SystemConfiguration/SystemConfiguration.h>
+#import <CoreLocation/CoreLocation.h>
 
 // SpringBoardServices launch API (available with com.apple.springboard.launchapplications entitlement)
 extern "C" int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
@@ -77,10 +81,26 @@ static NSData *screenshotJPEG(CGFloat quality) {
 
 #pragma mark - PhoneClawAPI
 
+// --- Proxy UserDefaults keys (persisted in com.82flex.trollvnc domain) ---
+static NSString *const kProxyIP       = @"ProxyIP";
+static NSString *const kProxyPort     = @"ProxyPort";
+static NSString *const kProxyUser     = @"ProxyUser";
+static NSString *const kProxyPass     = @"ProxyPass";
+static NSString *const kProxyEnabled  = @"ProxyEnabled";
+static NSString *const kProxyMode     = @"ProxyMode"; // "us", "vn", "none"
+static NSString *const kSpoofTimezone = @"SpoofTimezone";
+static NSString *const kSpoofLocale   = @"SpoofLocale";
+static NSString *const kSpoofLat      = @"SpoofLatitude";
+static NSString *const kSpoofLon      = @"SpoofLongitude";
+
 @implementation PhoneClawAPI {
     int _serverSocket;
     dispatch_source_t _acceptSource;
     BOOL _running;
+    // Proxy tunnel
+    pid_t _singboxPid;
+    BOOL _proxyRunning;
+    NSDate *_proxyStartTime;
 }
 
 + (instancetype)sharedAPI {
@@ -94,6 +114,9 @@ static NSData *screenshotJPEG(CGFloat quality) {
     self = [super init];
     _serverSocket = -1;
     _running = NO;
+    _singboxPid = 0;
+    _proxyRunning = NO;
+    _proxyStartTime = nil;
     return self;
 }
 
@@ -257,6 +280,22 @@ static NSData *screenshotJPEG(CGFloat quality) {
     else if ([path isEqualToString:@"/api/save-to-photos"] && [method isEqualToString:@"POST"]) {
         responseBody = [self handleSaveToPhotos:parseJSON(bodyData)];
     }
+    // --- Proxy Management ---
+    else if ([path isEqualToString:@"/api/proxy/status"] && [method isEqualToString:@"GET"]) {
+        responseBody = [self handleProxyStatus];
+    }
+    else if ([path isEqualToString:@"/api/proxy/config"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleProxyConfig:parseJSON(bodyData)];
+    }
+    else if ([path isEqualToString:@"/api/proxy/start"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleProxyStart];
+    }
+    else if ([path isEqualToString:@"/api/proxy/stop"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleProxyStop];
+    }
+    else if ([path isEqualToString:@"/api/proxy/spoof"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleProxySpoof:parseJSON(bodyData)];
+    }
     else {
         statusCode = 404;
         responseBody = jsonResponse(@{@"error": @"Not found"});
@@ -284,6 +323,15 @@ static NSData *screenshotJPEG(CGFloat quality) {
 - (NSData *)handleStatus {
     UIDevice *dev = [UIDevice currentDevice];
     [dev setBatteryMonitoringEnabled:YES];
+
+    // Check if sing-box process is still alive
+    BOOL proxyAlive = [self isSingboxProcessAlive];
+    if (_proxyRunning && !proxyAlive) {
+        _proxyRunning = NO;
+        _singboxPid = 0;
+        _proxyStartTime = nil;
+    }
+
     return jsonResponse(@{
         @"status": @"running",
         @"version": @PACKAGE_VERSION,
@@ -293,6 +341,7 @@ static NSData *screenshotJPEG(CGFloat quality) {
         @"battery": @((int)(dev.batteryLevel * 100)),
         @"screenWidth": @(self.screenWidth),
         @"screenHeight": @(self.screenHeight),
+        @"proxyStatus": _proxyRunning ? @"running" : @"stopped",
     });
 }
 
@@ -531,6 +580,359 @@ static NSData *screenshotJPEG(CGFloat quality) {
 
     // Return immediately — download happens in background
     return jsonResponse(@{@"ok": @YES, @"message": @"Download started, saving to Photos..."});
+}
+
+#pragma mark - Proxy Management
+
+- (NSString *)singboxBinaryPath {
+    return [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"sing-box"];
+}
+
+- (NSString *)singboxConfigPath {
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    return [dir stringByAppendingPathComponent:@"singbox-config.json"];
+}
+
+- (BOOL)isSingboxProcessAlive {
+    if (_singboxPid <= 0) return NO;
+    return (kill(_singboxPid, 0) == 0);
+}
+
+- (void)writeSingboxConfig {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *ip   = [defaults stringForKey:kProxyIP] ?: @"";
+    int port       = (int)[defaults integerForKey:kProxyPort];
+    NSString *user = [defaults stringForKey:kProxyUser] ?: @"";
+    NSString *pass = [defaults stringForKey:kProxyPass] ?: @"";
+
+    NSDictionary *config = @{
+        @"log": @{@"level": @"info", @"timestamp": @YES},
+        @"inbounds": @[@{
+            @"type": @"tun",
+            @"interface_name": @"utun_pclaw",
+            @"inet4_address": @"172.19.0.1/30",
+            @"auto_route": @YES,
+            @"strict_route": @YES,
+            @"stack": @"system",
+            @"sniff": @YES,
+        }],
+        @"outbounds": @[
+            @{
+                @"type": @"http",
+                @"tag": @"us-proxy",
+                @"server": ip,
+                @"server_port": @(port),
+                @"username": user,
+                @"password": pass,
+            },
+            @{@"type": @"direct", @"tag": @"direct"},
+        ],
+        @"route": @{
+            @"rules": @[
+                @{@"ip_cidr": @[@"100.64.0.0/10", @"10.0.0.0/8", @"192.168.0.0/16", @"172.16.0.0/12"], @"outbound": @"direct"},
+            ],
+            @"final": @"us-proxy",
+        },
+        @"dns": @{
+            @"servers": @[
+                @{@"tag": @"proxy-dns", @"address": @"https://1.1.1.1/dns-query", @"detour": @"us-proxy"},
+                @{@"tag": @"local-dns", @"address": @"local", @"detour": @"direct"},
+            ],
+            @"rules": @[@{@"outbound": @"direct", @"server": @"local-dns"}],
+            @"final": @"proxy-dns",
+        },
+    };
+
+    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
+    [data writeToFile:[self singboxConfigPath] atomically:YES];
+    NSLog(@"[PhoneClawAPI] sing-box config written to %@", [self singboxConfigPath]);
+}
+
+- (NSData *)handleProxyStatus {
+    BOOL alive = [self isSingboxProcessAlive];
+    if (_proxyRunning && !alive) {
+        _proxyRunning = NO;
+        _singboxPid = 0;
+        _proxyStartTime = nil;
+    }
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *mode = [defaults stringForKey:kProxyMode] ?: @"none";
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"proxyStatus": _proxyRunning ? @"running" : @"stopped",
+        @"pid": @(_singboxPid),
+        @"mode": mode,
+    }];
+
+    if (_proxyRunning && _proxyStartTime) {
+        result[@"uptime"] = @((int)[[NSDate date] timeIntervalSinceDate:_proxyStartTime]);
+    }
+
+    // Include current config (without password)
+    NSString *ip = [defaults stringForKey:kProxyIP];
+    if (ip.length > 0) {
+        result[@"config"] = @{
+            @"ip": ip ?: @"",
+            @"port": @([defaults integerForKey:kProxyPort]),
+            @"username": [defaults stringForKey:kProxyUser] ?: @"",
+            @"hasPassword": @([[defaults stringForKey:kProxyPass] length] > 0),
+        };
+    }
+
+    // Include spoof settings
+    NSString *tz = [defaults stringForKey:kSpoofTimezone];
+    NSString *locale = [defaults stringForKey:kSpoofLocale];
+    double lat = [defaults doubleForKey:kSpoofLat];
+    double lon = [defaults doubleForKey:kSpoofLon];
+
+    DeviceSpoofer *spoofer = [DeviceSpoofer sharedSpoofer];
+    NSMutableDictionary *spoof = [NSMutableDictionary dictionary];
+    if (tz) spoof[@"timezone"] = tz;
+    if (locale) spoof[@"locale"] = locale;
+    if (lat != 0 || lon != 0) {
+        spoof[@"latitude"] = @(lat);
+        spoof[@"longitude"] = @(lon);
+    }
+    spoof[@"gpsActive"] = @(spoofer.locationSpoofActive);
+    spoof[@"wifiActive"] = @(spoofer.wifiSpoofActive);
+    spoof[@"cellularActive"] = @(spoofer.cellularSpoofActive);
+    result[@"spoof"] = spoof;
+
+    return jsonResponse(result);
+}
+
+- (NSData *)handleProxyConfig:(NSDictionary *)params {
+    if (!params) return jsonResponse(@{@"error": @"Missing body"});
+
+    NSString *ip   = params[@"ip"];
+    NSNumber *port = params[@"port"];
+    NSString *user = params[@"username"];
+    NSString *pass = params[@"password"];
+    NSString *mode = params[@"mode"]; // "us", "vn", "none"
+
+    if (!ip || !port) return jsonResponse(@{@"error": @"Missing ip or port"});
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:ip forKey:kProxyIP];
+    [defaults setInteger:[port integerValue] forKey:kProxyPort];
+    if (user) [defaults setObject:user forKey:kProxyUser];
+    if (pass) [defaults setObject:pass forKey:kProxyPass];
+    if (mode) [defaults setObject:mode forKey:kProxyMode];
+    [defaults synchronize];
+
+    [self writeSingboxConfig];
+
+    NSLog(@"[PhoneClawAPI] Proxy config saved: %@:%@ mode=%@", ip, port, mode ?: @"none");
+    return jsonResponse(@{@"ok": @YES, @"message": @"Proxy config saved", @"mode": mode ?: @"none"});
+}
+
+- (NSData *)handleProxyStart {
+    if (_proxyRunning && [self isSingboxProcessAlive]) {
+        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy already running", @"pid": @(_singboxPid)});
+    }
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *ip = [defaults stringForKey:kProxyIP];
+    if (!ip || ip.length == 0) {
+        return jsonResponse(@{@"error": @"No proxy config. Call /api/proxy/config first"});
+    }
+
+    // Write fresh config
+    [self writeSingboxConfig];
+
+    NSString *binaryPath = [self singboxBinaryPath];
+    NSString *configPath = [self singboxConfigPath];
+
+    // Check binary exists
+    if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) {
+        NSLog(@"[PhoneClawAPI] sing-box binary not found at %@", binaryPath);
+        return jsonResponse(@{@"error": @"sing-box binary not found in app bundle"});
+    }
+
+    // Spawn sing-box process
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child process
+        const char *args[] = {
+            [binaryPath UTF8String],
+            "run",
+            "-c", [configPath UTF8String],
+            NULL
+        };
+        execv(args[0], (char *const *)args);
+        _exit(1); // exec failed
+    } else if (pid > 0) {
+        _singboxPid = pid;
+        _proxyRunning = YES;
+        _proxyStartTime = [NSDate date];
+        [defaults setBool:YES forKey:kProxyEnabled];
+        [defaults synchronize];
+
+        NSLog(@"[PhoneClawAPI] sing-box started with PID %d", pid);
+
+        // Monitor process in background
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            int status;
+            waitpid(pid, &status, 0);
+            NSLog(@"[PhoneClawAPI] sing-box process %d exited with status %d", pid, status);
+            if (self->_singboxPid == pid) {
+                self->_proxyRunning = NO;
+                self->_singboxPid = 0;
+                self->_proxyStartTime = nil;
+            }
+        });
+
+        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy tunnel started"});
+    } else {
+        NSLog(@"[PhoneClawAPI] Failed to fork sing-box process");
+        return jsonResponse(@{@"error": @"Failed to start sing-box (fork failed)"});
+    }
+}
+
+- (NSData *)handleProxyStop {
+    if (!_proxyRunning || _singboxPid <= 0) {
+        _proxyRunning = NO;
+        _singboxPid = 0;
+        _proxyStartTime = nil;
+        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy not running"});
+    }
+
+    // Send SIGTERM first, then SIGKILL if needed
+    kill(_singboxPid, SIGTERM);
+    NSLog(@"[PhoneClawAPI] Sent SIGTERM to sing-box PID %d", _singboxPid);
+
+    // Wait briefly for graceful shutdown
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if (self->_singboxPid > 0 && kill(self->_singboxPid, 0) == 0) {
+            kill(self->_singboxPid, SIGKILL);
+            NSLog(@"[PhoneClawAPI] Sent SIGKILL to sing-box PID %d", self->_singboxPid);
+        }
+    });
+
+    pid_t stoppedPid = _singboxPid;
+    _proxyRunning = NO;
+    _singboxPid = 0;
+    _proxyStartTime = nil;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:NO forKey:kProxyEnabled];
+    [defaults synchronize];
+
+    // Disable ALL spoofing when proxy stops — restore natural device state
+    [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
+    NSLog(@"[PhoneClawAPI] All spoofing disabled (proxy stopped)");
+
+    return jsonResponse(@{@"ok": @YES, @"message": @"Proxy stopped, spoofing disabled", @"pid": @(stoppedPid)});
+}
+
+- (NSData *)handleProxySpoof:(NSDictionary *)params {
+    if (!params) return jsonResponse(@{@"error": @"Missing body"});
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *mode = params[@"mode"] ?: [defaults stringForKey:kProxyMode] ?: @"none";
+    NSMutableArray *applied = [NSMutableArray array];
+
+    // Mode "none" or "vn" → disable all spoofing, restore natural state
+    if ([mode isEqualToString:@"none"] || [mode isEqualToString:@"vn"]) {
+        [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
+        [applied addObject:[NSString stringWithFormat:@"mode=%@ (all spoofing disabled)", mode]];
+        NSLog(@"[PhoneClawAPI] Mode=%@ — all spoofing disabled (natural device state)", mode);
+        return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": mode});
+    }
+
+    // Mode "us" → enable full US spoofing
+    // Timezone
+    NSString *timezone = params[@"timezone"];
+    if (timezone.length > 0) {
+        NSTimeZone *tz = [NSTimeZone timeZoneWithName:timezone];
+        if (tz) {
+            [NSTimeZone setDefaultTimeZone:tz];
+            [defaults setObject:timezone forKey:kSpoofTimezone];
+            [applied addObject:[NSString stringWithFormat:@"timezone=%@", timezone]];
+            NSLog(@"[PhoneClawAPI] Timezone spoofed to %@", timezone);
+        }
+    }
+
+    // Locale
+    NSString *locale = params[@"locale"];
+    if (locale.length > 0) {
+        NSString *prefsPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Preferences/.GlobalPreferences.plist"];
+        NSMutableDictionary *globalPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:prefsPath];
+        if (!globalPrefs) globalPrefs = [NSMutableDictionary dictionary];
+        globalPrefs[@"AppleLocale"] = locale;
+        NSString *lang = [locale componentsSeparatedByString:@"_"].firstObject;
+        if (lang) {
+            globalPrefs[@"AppleLanguages"] = @[locale, lang];
+        }
+        [globalPrefs writeToFile:prefsPath atomically:YES];
+        [defaults setObject:locale forKey:kSpoofLocale];
+        [applied addObject:[NSString stringWithFormat:@"locale=%@", locale]];
+
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFSTR("kCFLocaleCurrentLocaleDidChangeNotification"),
+            NULL, NULL, true
+        );
+    }
+
+    // GPS
+    NSNumber *lat = params[@"latitude"];
+    NSNumber *lon = params[@"longitude"];
+    if (lat && lon) {
+        double latitude = [lat doubleValue];
+        double longitude = [lon doubleValue];
+        [defaults setDouble:latitude forKey:kSpoofLat];
+        [defaults setDouble:longitude forKey:kSpoofLon];
+
+        [[DeviceSpoofer sharedSpoofer] startLocationSpoofWithLatitude:latitude longitude:longitude];
+        [applied addObject:[NSString stringWithFormat:@"gps=%.4f,%.4f", latitude, longitude]];
+    }
+
+    // WiFi BSSID — only hide when mode=us (VN WiFi would reveal location)
+    [[DeviceSpoofer sharedSpoofer] startWiFiSpoof];
+    [applied addObject:@"wifi_bssid=hidden"];
+
+    // Cell Tower MCC/MNC — US values only when mode=us
+    [[DeviceSpoofer sharedSpoofer] startCellularSpoof];
+    [applied addObject:@"cellular=US(310/260)"];
+
+    [defaults synchronize];
+    return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": @"us"});
+}
+
+- (void)autoStartProxy {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (![defaults boolForKey:kProxyEnabled]) return;
+
+    NSString *ip = [defaults stringForKey:kProxyIP];
+    if (!ip || ip.length == 0) return;
+
+    NSString *mode = [defaults stringForKey:kProxyMode] ?: @"none";
+    if ([mode isEqualToString:@"none"]) return; // No proxy mode → do nothing
+
+    NSLog(@"[PhoneClawAPI] Auto-starting proxy (mode=%@)", mode);
+    [self handleProxyStart];
+
+    // Re-apply spoof settings based on mode
+    NSMutableDictionary *spoofParams = [NSMutableDictionary dictionary];
+    spoofParams[@"mode"] = mode;
+
+    if ([mode isEqualToString:@"us"]) {
+        NSString *tz = [defaults stringForKey:kSpoofTimezone];
+        NSString *locale = [defaults stringForKey:kSpoofLocale];
+        double lat = [defaults doubleForKey:kSpoofLat];
+        double lon = [defaults doubleForKey:kSpoofLon];
+
+        if (tz) spoofParams[@"timezone"] = tz;
+        if (locale) spoofParams[@"locale"] = locale;
+        if (lat != 0 || lon != 0) {
+            spoofParams[@"latitude"] = @(lat);
+            spoofParams[@"longitude"] = @(lon);
+        }
+    }
+    // For "vn" mode, spoofParams only has mode="vn" → handleProxySpoof will disable all spoofing
+    [self handleProxySpoof:spoofParams];
 }
 
 @end

@@ -29,6 +29,7 @@ trollvncserver_FILES += src/ScreenCapturer.mm
 trollvncserver_FILES += src/STHIDEventGenerator.mm
 trollvncserver_FILES += src/OhMyJetsam.mm
 trollvncserver_FILES += src/PhoneClawAPI.mm
+trollvncserver_FILES += src/DeviceSpoofer.mm
 
 trollvncserver_CFLAGS += -fobjc-arc
 trollvncserver_CFLAGS += -Wno-unknown-warning-option
@@ -85,6 +86,10 @@ trollvncserver_FRAMEWORKS += UIKit
 trollvncserver_FRAMEWORKS += UserNotifications
 trollvncserver_FRAMEWORKS += ImageIO
 trollvncserver_FRAMEWORKS += Photos
+trollvncserver_FRAMEWORKS += CoreLocation
+trollvncserver_FRAMEWORKS += CoreTelephony
+trollvncserver_FRAMEWORKS += NetworkExtension
+trollvncserver_FRAMEWORKS += SystemConfiguration
 
 trollvncserver_PRIVATE_FRAMEWORKS += FrontBoardServices
 trollvncserver_PRIVATE_FRAMEWORKS += SpringBoardServices

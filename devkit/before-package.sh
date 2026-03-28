@@ -21,6 +21,19 @@ GIT_COMMIT_COUNT=$(git rev-list --count HEAD)
 cp -rp "$THEOS_STAGING_DIR/usr/bin/trollvncserver" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/"
 cp -rp "$THEOS_STAGING_DIR/usr/bin/trollvncmanager" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/"
 
+# Bundle sing-box binary (proxy tunnel engine)
+if [ -f "$THEOS_STAGING_DIR/usr/bin/sing-box" ]; then
+    cp -rp "$THEOS_STAGING_DIR/usr/bin/sing-box" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/"
+    ldid -Sapp/TrollVNC/TrollVNC/TrollVNC.entitlements "$THEOS_STAGING_DIR/Applications/TrollVNC.app/sing-box"
+    echo "[before-package] sing-box binary bundled and signed"
+elif [ -f "sing-box" ]; then
+    cp -rp "sing-box" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/"
+    ldid -Sapp/TrollVNC/TrollVNC/TrollVNC.entitlements "$THEOS_STAGING_DIR/Applications/TrollVNC.app/sing-box"
+    echo "[before-package] sing-box binary bundled from project root and signed"
+else
+    echo "[before-package] WARNING: sing-box binary not found, proxy feature will not work"
+fi
+
 # Collect bundle resources
 cp -rp "$THEOS_STAGING_DIR/Library/PreferenceBundles/TrollVNCPrefs.bundle" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/"
 rm -f "$THEOS_STAGING_DIR/Applications/TrollVNC.app/TrollVNCPrefs.bundle/TrollVNCPrefs"

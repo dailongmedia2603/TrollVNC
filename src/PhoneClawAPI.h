@@ -15,6 +15,13 @@
    POST /api/clipboard    — {"text":"..."}
    POST /api/save-to-photos — {"url":"https://..."} download & save to Photos
 
+ Proxy Management:
+   GET  /api/proxy/status  — proxy tunnel status
+   POST /api/proxy/config  — {"ip":"...","port":8080,"username":"...","password":"..."}
+   POST /api/proxy/start   — start sing-box tunnel
+   POST /api/proxy/stop    — stop sing-box tunnel
+   POST /api/proxy/spoof   — {"timezone":"America/New_York","locale":"en_US","latitude":40.7,"longitude":-74.0}
+
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2.
 */
@@ -42,6 +49,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Set the screen buffer pointer for screenshot capture
 - (void)setScreenBuffer:(void *)buffer width:(int)w height:(int)h bytesPerPixel:(int)bpp;
+
+/// Auto-start proxy if previously enabled (call after server starts)
+- (void)autoStartProxy;
 
 @end
 
