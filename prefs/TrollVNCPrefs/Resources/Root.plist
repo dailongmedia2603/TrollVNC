@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>title</key>
-	<string>PhoneClaw VNC</string>
+	<string>Phone Agent</string>
 	<key>items</key>
 	<array>
 
@@ -192,7 +192,7 @@
 			<key>label</key>
 			<string>Silence Notifications</string>
 			<key>default</key>
-			<true/>
+			<false/>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -204,7 +204,7 @@
 			<key>label</key>
 			<string>Connect/Disconnect Notifications</string>
 			<key>default</key>
-			<true/>
+			<false/>
 		</dict>
 
 		<!-- Keep-Alive (sec) -->

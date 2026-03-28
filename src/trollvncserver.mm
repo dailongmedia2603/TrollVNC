@@ -131,8 +131,8 @@ static int gRepeaterPort = 5500;
 static int gRepeaterId = 12345679;
 
 // User notifications
-static BOOL gUserClientNotifsEnabled = YES;
-static BOOL gUserSingleNotifsEnabled = YES;
+static BOOL gUserClientNotifsEnabled = NO;
+static BOOL gUserSingleNotifsEnabled = NO;
 
 // Blocked hosts (temporary blacklist)
 static NSMutableSet<NSString *> *gBlockedHosts = nil;

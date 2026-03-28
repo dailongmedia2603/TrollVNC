@@ -8,7 +8,7 @@
 		<string>_http._tcp</string>
 	</array>
 	<key>CFBundleDisplayName</key>
-	<string>PhoneClaw</string>
+	<string>Phone Agent</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>PhoneClaw uses the local network to advertise and accept VNC connections from clients on your LAN.</string>
 	<key>UIApplicationSceneManifest</key>
