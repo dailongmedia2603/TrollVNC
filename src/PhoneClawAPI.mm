@@ -469,12 +469,51 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     NSString *text = params[@"text"];
     if (!text) return jsonResponse(@{@"error": @"Missing text"});
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        for (NSUInteger i = 0; i < text.length; i++) {
-            NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
-            [[STHIDEventGenerator sharedGenerator] keyPress:ch];
-        }
-    });
+    // Check if text is pure ASCII (fast path: keyPress works for ASCII)
+    BOOL isASCII = YES;
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar ch = [text characterAtIndex:i];
+        if (ch > 127) { isASCII = NO; break; }
+    }
+
+    if (isASCII) {
+        // ASCII: type character by character with natural delay
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (NSUInteger i = 0; i < text.length; i++) {
+                NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
+                [[STHIDEventGenerator sharedGenerator] keyPress:ch];
+                // Natural typing delay between characters
+                [NSThread sleepForTimeInterval:0.08];
+            }
+        });
+    } else {
+        // Unicode (Vietnamese, emoji, etc): use clipboard paste
+        // This is the only reliable way to input non-ASCII text on iOS
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            // Save current clipboard
+            NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
+
+            // Set text to clipboard
+            [UIPasteboard generalPasteboard].string = text;
+
+            // Small delay to ensure clipboard is set
+            [NSThread sleepForTimeInterval:0.1];
+
+            // Simulate Select All (Cmd+A) then Paste (Cmd+V)
+            // This handles both empty and non-empty text fields
+            [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
+            [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
+            [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
+
+            // Restore clipboard after paste
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (savedClipboard) {
+                    [UIPasteboard generalPasteboard].string = savedClipboard;
+                }
+            });
+        });
+    }
+
     return jsonResponse(@{@"ok": @YES});
 }
 
