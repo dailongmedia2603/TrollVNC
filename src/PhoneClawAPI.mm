@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
 #import <Photos/Photos.h>
+#include <atomic>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -32,6 +33,61 @@ extern "C" CFStringRef SBSApplicationLaunchingErrorString(int error);
 static void *sScreenBuffer = NULL;
 static int sScreenWidth = 0;
 static int sScreenHeight = 0;
+
+// VNC globals from trollvncserver — needed for coordinate transform
+extern int gSrcWidth, gSrcHeight;   // capture source dimensions (portrait)
+extern int gWidth, gHeight;          // VNC framebuffer dimensions (post-rotation, post-scale)
+extern std::atomic<int> gRotationQuad;
+extern BOOL gOrientationSyncEnabled;
+extern BOOL gShouldApplyOrientationFix;
+
+/**
+ * Convert normalized (0-1) coordinates to device touch point.
+ * Same transform as vncPointToDevicePoint in trollvncserver.mm.
+ * This ensures HTTP API taps land at the exact same position as VNC Live taps.
+ */
+static CGPoint normalizedToDevicePoint(CGFloat nx, CGFloat ny) {
+    // Convert normalized to VNC pixel coords
+    int vx = (int)(nx * sScreenWidth);
+    int vy = (int)(ny * sScreenHeight);
+
+    // --- Same logic as vncPointToDevicePoint ---
+    int rotQ = (gOrientationSyncEnabled ? gRotationQuad.load(std::memory_order_relaxed) : 0) & 3;
+
+#if !TARGET_IPHONE_SIMULATOR
+    int effRotQ = (rotQ + (gShouldApplyOrientationFix ? 3 : 0)) & 3;
+#else
+    int effRotQ = rotQ;
+#endif
+
+    int rotW = (effRotQ % 2 == 0) ? gSrcWidth : gSrcHeight;
+    int rotH = (effRotQ % 2 == 0) ? gSrcHeight : gSrcWidth;
+
+    double sx = (gWidth > 0) ? ((double)rotW / (double)gWidth) : 1.0;
+    double sy = (gHeight > 0) ? ((double)rotH / (double)gHeight) : 1.0;
+    double stX = sx * (double)vx;
+    double stY = sy * (double)vy;
+
+    if (stX < 0) stX = 0;
+    if (stY < 0) stY = 0;
+    if (stX > (double)(rotW - 1)) stX = (double)(rotW - 1);
+    if (stY > (double)(rotH - 1)) stY = (double)(rotH - 1);
+
+    double dx = 0.0, dy = 0.0;
+    switch (effRotQ) {
+        case 0: dx = stX; dy = stY; break;
+        case 1: dx = stY; dy = (double)(gSrcHeight - 1) - stX; break;
+        case 2: dx = (double)(gSrcWidth - 1) - stX; dy = (double)(gSrcHeight - 1) - stY; break;
+        case 3: dx = (double)(gSrcWidth - 1) - stY; dy = stX; break;
+    }
+
+    if (dx < 0) dx = 0;
+    if (dy < 0) dy = 0;
+    if (dx > (double)(gSrcWidth - 1)) dx = (double)(gSrcWidth - 1);
+    if (dy > (double)(gSrcHeight - 1)) dy = (double)(gSrcHeight - 1);
+
+    return CGPointMake((CGFloat)dx, (CGFloat)dy);
+}
 static int sScreenBytesPerPixel = 4;
 
 #pragma mark - Helpers
@@ -354,8 +410,8 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     CGFloat x = [params[@"x"] doubleValue];
     CGFloat y = [params[@"y"] doubleValue];
 
-    CGSize screen = [UIScreen mainScreen].bounds.size;
-    CGPoint point = CGPointMake(x * screen.width, y * screen.height);
+    // Use VNC coordinate transform (same as Live VNC viewer)
+    CGPoint point = normalizedToDevicePoint(x, y);
 
     // Reuse sendTaps (same as doubletap which works reliably)
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -376,8 +432,8 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     CGFloat delay = [params[@"delay"] doubleValue];
     if (delay <= 0) delay = 0.05;
 
-    CGSize screen = [UIScreen mainScreen].bounds.size;
-    CGPoint point = CGPointMake(x * screen.width, y * screen.height);
+    // Use VNC coordinate transform (same as Live VNC viewer)
+    CGPoint point = normalizedToDevicePoint(x, y);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Use sendTaps for precise control: 2 taps, 1 finger, custom delay
@@ -398,9 +454,9 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     CGFloat duration = [params[@"duration"] doubleValue];
     if (duration <= 0) duration = 0.3;
 
-    CGSize screen = [UIScreen mainScreen].bounds.size;
-    CGPoint start = CGPointMake(fromX * screen.width, fromY * screen.height);
-    CGPoint end = CGPointMake(toX * screen.width, toY * screen.height);
+    // Use VNC coordinate transform (same as Live VNC viewer)
+    CGPoint start = normalizedToDevicePoint(fromX, fromY);
+    CGPoint end = normalizedToDevicePoint(toX, toY);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] dragLinearWithStartPoint:start endPoint:end duration:duration];
