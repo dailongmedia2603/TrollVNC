@@ -779,58 +779,108 @@ static BOOL _scDynamicStoreLoaded = NO;
     return (_pSCDynamicStoreCreate != NULL && _pSCDynamicStoreSetValue != NULL);
 }
 
-// Set iOS WiFi proxy to route traffic through local sing-box
-// Uses SCDynamicStore via dlopen (same pattern as TVNCRootListController.m)
-// Tailscale uses utun interface → NOT affected by WiFi proxy
+// Set iOS WiFi proxy to route traffic through local sing-box.
+// Strategy: SCDynamicStore (runtime) + WiFi plist (persistent) + fallback notification.
+// Tailscale uses utun interface → NOT affected by WiFi proxy.
 - (void)enableSystemProxy {
-    if (![self loadSCDynamicStore]) {
-        NSLog(@"[PhoneClawAPI] SCDynamicStore unavailable, proxy must be set manually");
-        [[BulletinManager sharedManager] updateSingleBannerWithContent:
-            [NSString stringWithFormat:@"⚠️ Set WiFi proxy thủ công: 127.0.0.1:%d", kLocalProxyPort]
-            badgeCount:0 userInfo:nil];
-        return;
+    BOOL anySuccess = NO;
+
+    // Method 1: SCDynamicStore (immediate effect, may not persist)
+    if ([self loadSCDynamicStore]) {
+        NSDictionary *proxyDict = @{
+            @"HTTPEnable": @1,
+            @"HTTPProxy": @"127.0.0.1",
+            @"HTTPPort": @(kLocalProxyPort),
+            @"HTTPSEnable": @1,
+            @"HTTPSProxy": @"127.0.0.1",
+            @"HTTPSPort": @(kLocalProxyPort),
+            @"ExceptionsList": @[@"*.local", @"127.0.0.1", @"localhost", @"100.64.*", @"10.*", @"172.16.*", @"192.168.*"],
+        };
+        SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
+        if (store) {
+            if (_pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict)) {
+                NSLog(@"[PhoneClawAPI] SCDynamicStore proxy set OK");
+                anySuccess = YES;
+            }
+            CFRelease(store);
+        }
     }
 
-    NSDictionary *proxyDict = @{
-        @"HTTPEnable": @1,
-        @"HTTPProxy": @"127.0.0.1",
-        @"HTTPPort": @(kLocalProxyPort),
-        @"HTTPSEnable": @1,
-        @"HTTPSProxy": @"127.0.0.1",
-        @"HTTPSPort": @(kLocalProxyPort),
-        // Exclude Tailscale & local networks from proxy
-        @"ExceptionsList": @[@"*.local", @"127.0.0.1", @"localhost", @"100.64.*", @"10.*", @"172.16.*", @"192.168.*"],
-    };
-
-    SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-    if (store) {
-        BOOL ok = _pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict);
-        CFRelease(store);
-        if (ok) {
-            NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d (Tailscale excluded)", kLocalProxyPort);
-        } else {
-            NSLog(@"[PhoneClawAPI] SCDynamicStoreSetValue failed");
+    // Method 2: Write WiFi plist directly (persistent across WiFi reconnects)
+    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
+    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
+    if (wifiPrefs) {
+        // Find the current connected network and set proxy on it
+        NSDictionary *knownNetworks = wifiPrefs[@"List of known networks"];
+        if ([knownNetworks isKindOfClass:[NSArray class]]) {
+            NSMutableArray *networks = [NSMutableArray arrayWithArray:(NSArray *)knownNetworks];
+            for (NSUInteger i = 0; i < networks.count; i++) {
+                NSMutableDictionary *network = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
+                // Set proxy for all known networks
+                network[@"ProxyType"] = @"manual";
+                network[@"ProxyServer"] = @"127.0.0.1";
+                network[@"ProxyPort"] = @(kLocalProxyPort);
+                network[@"ProxyServerHTTPS"] = @"127.0.0.1";
+                network[@"ProxyPortHTTPS"] = @(kLocalProxyPort);
+                networks[i] = network;
+            }
+            wifiPrefs[@"List of known networks"] = networks;
+            if ([wifiPrefs writeToFile:wifiPlistPath atomically:YES]) {
+                NSLog(@"[PhoneClawAPI] WiFi plist proxy set OK (%lu networks)", (unsigned long)networks.count);
+                anySuccess = YES;
+            }
         }
     } else {
-        NSLog(@"[PhoneClawAPI] Failed to create SCDynamicStore");
+        NSLog(@"[PhoneClawAPI] Cannot read WiFi plist at %@", wifiPlistPath);
+    }
+
+    if (anySuccess) {
+        NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d", kLocalProxyPort);
+    } else {
+        NSLog(@"[PhoneClawAPI] All proxy methods failed, manual setup needed");
+        [[BulletinManager sharedManager] updateSingleBannerWithContent:
+            [NSString stringWithFormat:@"⚠️ Set WiFi proxy: 127.0.0.1:%d", kLocalProxyPort]
+            badgeCount:0 userInfo:nil];
     }
 }
 
 // Remove iOS WiFi proxy — restore direct connection
 - (void)disableSystemProxy {
-    if (![self loadSCDynamicStore]) return;
-
-    NSDictionary *proxyDict = @{
-        @"HTTPEnable": @0,
-        @"HTTPSEnable": @0,
-    };
-
-    SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-    if (store) {
-        _pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict);
-        CFRelease(store);
-        NSLog(@"[PhoneClawAPI] System proxy disabled");
+    // Method 1: SCDynamicStore
+    if ([self loadSCDynamicStore]) {
+        NSDictionary *proxyDict = @{
+            @"HTTPEnable": @0,
+            @"HTTPSEnable": @0,
+        };
+        SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
+        if (store) {
+            _pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict);
+            CFRelease(store);
+        }
     }
+
+    // Method 2: Clear WiFi plist proxy
+    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
+    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
+    if (wifiPrefs) {
+        NSDictionary *knownNetworks = wifiPrefs[@"List of known networks"];
+        if ([knownNetworks isKindOfClass:[NSArray class]]) {
+            NSMutableArray *networks = [NSMutableArray arrayWithArray:(NSArray *)knownNetworks];
+            for (NSUInteger i = 0; i < networks.count; i++) {
+                NSMutableDictionary *network = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
+                [network removeObjectForKey:@"ProxyType"];
+                [network removeObjectForKey:@"ProxyServer"];
+                [network removeObjectForKey:@"ProxyPort"];
+                [network removeObjectForKey:@"ProxyServerHTTPS"];
+                [network removeObjectForKey:@"ProxyPortHTTPS"];
+                networks[i] = network;
+            }
+            wifiPrefs[@"List of known networks"] = networks;
+            [wifiPrefs writeToFile:wifiPlistPath atomically:YES];
+        }
+    }
+
+    NSLog(@"[PhoneClawAPI] System proxy disabled (both methods)");
 }
 
 - (NSData *)handleProxyStatus {
