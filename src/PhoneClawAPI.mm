@@ -710,6 +710,9 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     return (kill(_singboxPid, 0) == 0);
 }
 
+// Local sing-box proxy port — apps connect to this, sing-box forwards to remote proxy
+static const int kLocalProxyPort = 19080;
+
 - (void)writeSingboxConfig {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *ip   = [defaults stringForKey:kProxyIP] ?: @"";
@@ -717,16 +720,16 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     NSString *user = [defaults stringForKey:kProxyUser] ?: @"";
     NSString *pass = [defaults stringForKey:kProxyPass] ?: @"";
 
+    // Use "mixed" inbound (HTTP+SOCKS5 local proxy) instead of TUN.
+    // TUN requires root/jailbreak which TrollStore doesn't provide.
+    // After sing-box starts, we set iOS WiFi proxy to 127.0.0.1:kLocalProxyPort.
     NSDictionary *config = @{
         @"log": @{@"level": @"info", @"timestamp": @YES},
         @"inbounds": @[@{
-            @"type": @"tun",
-            @"interface_name": @"utun_pclaw",
-            @"inet4_address": @"172.19.0.1/30",
-            @"auto_route": @YES,
-            @"strict_route": @YES,
-            @"stack": @"system",
-            @"sniff": @YES,
+            @"type": @"mixed",
+            @"tag": @"mixed-in",
+            @"listen": @"127.0.0.1",
+            @"listen_port": @(kLocalProxyPort),
         }],
         @"outbounds": @[
             @{
@@ -745,19 +748,48 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
             ],
             @"final": @"us-proxy",
         },
-        @"dns": @{
-            @"servers": @[
-                @{@"tag": @"proxy-dns", @"address": @"https://1.1.1.1/dns-query", @"detour": @"us-proxy"},
-                @{@"tag": @"local-dns", @"address": @"local", @"detour": @"direct"},
-            ],
-            @"rules": @[@{@"outbound": @"direct", @"server": @"local-dns"}],
-            @"final": @"proxy-dns",
-        },
     };
 
     NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
     [data writeToFile:[self singboxConfigPath] atomically:YES];
     NSLog(@"[PhoneClawAPI] sing-box config written to %@", [self singboxConfigPath]);
+}
+
+// Set iOS WiFi proxy to route traffic through local sing-box
+- (void)enableSystemProxy {
+    NSDictionary *proxySettings = @{
+        (NSString *)kCFNetworkProxiesHTTPEnable: @YES,
+        (NSString *)kCFNetworkProxiesHTTPProxy: @"127.0.0.1",
+        (NSString *)kCFNetworkProxiesHTTPPort: @(kLocalProxyPort),
+        (NSString *)kCFNetworkProxiesHTTPSEnable: @YES,
+        (NSString *)kCFNetworkProxiesHTTPSProxy: @"127.0.0.1",
+        (NSString *)kCFNetworkProxiesHTTPSPort: @(kLocalProxyPort),
+    };
+
+    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
+    if (store) {
+        // Set global proxy for the current network
+        SCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxySettings);
+        CFRelease(store);
+        NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d", kLocalProxyPort);
+    } else {
+        NSLog(@"[PhoneClawAPI] Failed to create SCDynamicStore for proxy settings");
+    }
+}
+
+// Remove iOS WiFi proxy — restore direct connection
+- (void)disableSystemProxy {
+    NSDictionary *proxySettings = @{
+        (NSString *)kCFNetworkProxiesHTTPEnable: @NO,
+        (NSString *)kCFNetworkProxiesHTTPSEnable: @NO,
+    };
+
+    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
+    if (store) {
+        SCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxySettings);
+        CFRelease(store);
+        NSLog(@"[PhoneClawAPI] System proxy disabled");
+    }
 }
 
 - (NSData *)handleProxyStatus {
@@ -925,11 +957,14 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
             return jsonResponse(@{@"ok": @NO, @"error": @"sing-box crashed immediately after start — check config or permissions"});
         }
 
+        // Enable system proxy to route traffic through local sing-box
+        [self enableSystemProxy];
+
         NSString *proxyInfo = [NSString stringWithFormat:@"🛡️ Proxy đã bật — %@:%ld (PID %d)",
             ip, (long)[defaults integerForKey:kProxyPort], pid];
         [[BulletinManager sharedManager] popBannerWithContent:proxyInfo userInfo:nil];
 
-        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy tunnel started and verified"});
+        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy started and system proxy enabled"});
     } else {
         NSLog(@"[PhoneClawAPI] Failed to fork sing-box process");
         [[BulletinManager sharedManager] popBannerWithContent:@"❌ Không thể khởi động proxy (fork failed)" userInfo:nil];
@@ -967,6 +1002,9 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:NO forKey:kProxyEnabled];
     [defaults synchronize];
+
+    // Disable system proxy
+    [self disableSystemProxy];
 
     // Disable ALL spoofing when proxy stops — restore natural device state
     [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];

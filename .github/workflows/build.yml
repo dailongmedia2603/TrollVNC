@@ -113,8 +113,9 @@ jobs:
           # Install Go
           brew install go
 
-          # Clone sing-box
-          git clone --depth 1 https://github.com/SagerNet/sing-box.git /tmp/sing-box
+          # Clone sing-box v1.10.7 (compatible with app's config format)
+          # v1.12+ removed legacy TUN fields (inet4_address) and DNS format
+          git clone --depth 1 --branch v1.10.7 https://github.com/SagerNet/sing-box.git /tmp/sing-box
           cd /tmp/sing-box
 
           # Build Go binary (static, arm64)
