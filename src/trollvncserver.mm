@@ -105,7 +105,7 @@ static int gModMapScheme = 0;
 static BOOL gAutoAssistEnabled = NO;
 static BOOL gCursorEnabled = NO;
 static BOOL gKeyEventLogging = NO;
-static BOOL gOrientationSyncEnabled = YES;
+BOOL gOrientationSyncEnabled = YES;
 
 // Classic VNC authentication
 static char **gAuthPasswdVec = NULL;        // owns the vector
@@ -1528,10 +1528,10 @@ static void parseCLI(int argc, const char *argv[]) {
 static rfbScreenInfoPtr gScreen = NULL;
 static void (^gFrameHandler)(CMSampleBufferRef) = nil;
 
-static int gWidth = 0;
-static int gHeight = 0;
-static int gSrcWidth = 0;      // capture source width
-static int gSrcHeight = 0;     // capture source height
+int gWidth = 0;
+int gHeight = 0;
+int gSrcWidth = 0;      // capture source width
+int gSrcHeight = 0;     // capture source height
 static size_t gFBSize = 0;     // in bytes
 static int gBytesPerPixel = 4; // ARGB/BGRA 32-bit
 
@@ -1984,7 +1984,7 @@ static const BOOL cParallelHashOnFlush = YES; // use parallel hashing at flush t
 
 #pragma mark - Frame Handlers
 
-static std::atomic<int> gRotationQuad(0); // 0=0°, 1=90°, 2=180°, 3=270° (clockwise)
+std::atomic<int> gRotationQuad(0); // 0=0°, 1=90°, 2=180°, 3=270° (clockwise)
 static void *gRotateScratch = NULL;       // rotation scratch (for 90°/270°)
 static size_t gRotateScratchSize = 0;     // bytes
 static void *gScaleTemp = NULL;           // vImage scale temp buffer
