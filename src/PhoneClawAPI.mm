@@ -477,36 +477,42 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     }
 
     if (isASCII) {
-        // ASCII: type character by character with natural delay
-        dispatch_async(dispatch_get_main_queue(), ^{
+        // ASCII: type character by character like a real person
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             for (NSUInteger i = 0; i < text.length; i++) {
                 NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
-                [[STHIDEventGenerator sharedGenerator] keyPress:ch];
-                // Natural typing delay between characters
-                [NSThread sleepForTimeInterval:0.08];
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    [[STHIDEventGenerator sharedGenerator] keyPress:ch];
+                });
+                // Human-like typing: 150-300ms per character
+                double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
+                [NSThread sleepForTimeInterval:delay];
             }
         });
     } else {
-        // Unicode (Vietnamese, emoji, etc): use clipboard paste
-        // This is the only reliable way to input non-ASCII text on iOS
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            // Save current clipboard
+        // Unicode (Vietnamese, emoji, etc): paste character by character
+        // like a real person typing slowly
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
 
-            // Set text to clipboard
-            [UIPasteboard generalPasteboard].string = text;
+            for (NSUInteger i = 0; i < text.length; i++) {
+                NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
 
-            // Small delay to ensure clipboard is set
-            [NSThread sleepForTimeInterval:0.1];
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    [UIPasteboard generalPasteboard].string = ch;
+                    [NSThread sleepForTimeInterval:0.05];
+                    [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
+                    [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
+                    [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
+                });
 
-            // Simulate Select All (Cmd+A) then Paste (Cmd+V)
-            // This handles both empty and non-empty text fields
-            [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
-            [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
-            [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
+                // Human-like typing: 150-300ms per character
+                double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
+                [NSThread sleepForTimeInterval:delay];
+            }
 
-            // Restore clipboard after paste
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Restore clipboard after done
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (savedClipboard) {
                     [UIPasteboard generalPasteboard].string = savedClipboard;
                 }
