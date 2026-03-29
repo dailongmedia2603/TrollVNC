@@ -117,13 +117,25 @@ jobs:
           git clone --depth 1 https://github.com/SagerNet/sing-box.git /tmp/sing-box
           cd /tmp/sing-box
 
-          # Build for iOS arm64
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+          # Find iOS SDK path
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          IOS_CC=$(xcrun --sdk iphoneos --find clang)
+          IOS_MIN_VERSION="15.0"
+
+          # Build for iOS arm64 with CGO enabled to get correct platform binary
+          # CGO is needed so the linker produces an iOS Mach-O (not macOS)
+          CGO_ENABLED=1 \
+          GOOS=ios \
+          GOARCH=arm64 \
+          CC="${IOS_CC} -isysroot ${IOS_SDK} -arch arm64 -miphoneos-version-min=${IOS_MIN_VERSION}" \
+          go build \
             -trimpath \
             -ldflags="-s -w" \
             -o "$GITHUB_WORKSPACE/sing-box" \
             ./cmd/sing-box
 
+          # Verify binary is iOS arm64
+          file "$GITHUB_WORKSPACE/sing-box"
           echo "[CI] sing-box binary built ($(du -h $GITHUB_WORKSPACE/sing-box | cut -f1))"
 
       - name: Generate Managed.plist (managed build)
