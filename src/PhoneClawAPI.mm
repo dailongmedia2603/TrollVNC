@@ -490,25 +490,36 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
             }
         });
     } else {
-        // Unicode (Vietnamese, emoji, etc): paste character by character
-        // like a real person typing slowly
+        // Unicode (Vietnamese, emoji, etc): paste word by word
+        // Split by spaces, paste each word then type space between
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
+            NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
 
-            for (NSUInteger i = 0; i < text.length; i++) {
-                NSString *ch = [text substringWithRange:NSMakeRange(i, 1)];
+            for (NSUInteger w = 0; w < words.count; w++) {
+                NSString *word = words[w];
+                if (word.length == 0) continue;
 
+                // Paste the whole word via clipboard
                 dispatch_sync(dispatch_get_main_queue(), ^{
-                    [UIPasteboard generalPasteboard].string = ch;
+                    [UIPasteboard generalPasteboard].string = word;
                     [NSThread sleepForTimeInterval:0.05];
                     [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
                     [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
                     [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
                 });
 
-                // Human-like typing: 150-300ms per character
-                double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
-                [NSThread sleepForTimeInterval:delay];
+                // Pause after word (like thinking between words)
+                double wordDelay = 0.3 + ((double)(arc4random_uniform(300)) / 1000.0);
+                [NSThread sleepForTimeInterval:wordDelay];
+
+                // Type space between words (not after last word)
+                if (w < words.count - 1) {
+                    dispatch_sync(dispatch_get_main_queue(), ^{
+                        [[STHIDEventGenerator sharedGenerator] keyPress:@" "];
+                    });
+                    [NSThread sleepForTimeInterval:0.1];
+                }
             }
 
             // Restore clipboard after done
