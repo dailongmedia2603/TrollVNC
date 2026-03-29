@@ -124,17 +124,29 @@ jobs:
             -o "$GITHUB_WORKSPACE/sing-box" \
             ./cmd/sing-box
 
-          # CRITICAL: Go produces macOS platform tag (platform 1).
-          # iOS DYLD rejects binaries with wrong platform.
-          # Use vtool to change platform from macOS (1) to iOS (2).
-          echo "[CI] Before vtool:"
-          vtool -show-build "$GITHUB_WORKSPACE/sing-box" | head -5
-          vtool -set-build-version ios 15.0 16.0 -replace -output "$GITHUB_WORKSPACE/sing-box" "$GITHUB_WORKSPACE/sing-box"
-          echo "[CI] After vtool:"
-          vtool -show-build "$GITHUB_WORKSPACE/sing-box" | head -5
+          SINGBOX="$GITHUB_WORKSPACE/sing-box"
 
-          file "$GITHUB_WORKSPACE/sing-box"
-          echo "[CI] sing-box binary built for iOS ($(du -h $GITHUB_WORKSPACE/sing-box | cut -f1))"
+          # CRITICAL FIX 1: Go produces macOS platform tag (platform 1).
+          # iOS DYLD rejects binaries with wrong platform.
+          vtool -set-build-version ios 15.0 16.0 -replace -output "$SINGBOX" "$SINGBOX"
+
+          # CRITICAL FIX 2: Go links macOS-style framework paths (/Versions/A/).
+          # iOS doesn't have /Versions/A/ — fix paths with install_name_tool.
+          install_name_tool -change \
+            "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation" \
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" \
+            "$SINGBOX"
+          install_name_tool -change \
+            "/System/Library/Frameworks/Security.framework/Versions/A/Security" \
+            "/System/Library/Frameworks/Security.framework/Security" \
+            "$SINGBOX"
+
+          # Verify
+          echo "[CI] Platform:"
+          vtool -show-build "$SINGBOX" | grep platform
+          echo "[CI] Libraries:"
+          otool -L "$SINGBOX"
+          echo "[CI] sing-box built for iOS ($(du -h "$SINGBOX" | cut -f1))"
 
       - name: Generate Managed.plist (managed build)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.is_managed == true }}
