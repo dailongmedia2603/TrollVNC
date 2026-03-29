@@ -835,17 +835,26 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     [self writeSingboxConfig];
 
     NSLog(@"[PhoneClawAPI] Proxy config saved: %@:%@ mode=%@", ip, port, mode ?: @"none");
+
+    [[BulletinManager sharedManager] updateSingleBannerWithContent:
+        [NSString stringWithFormat:@"⚙️ Proxy config: %@:%@ (%@)", ip, port, mode ?: @"none"]
+        badgeCount:0 userInfo:nil];
+
     return jsonResponse(@{@"ok": @YES, @"message": @"Proxy config saved", @"mode": mode ?: @"none"});
 }
 
 - (NSData *)handleProxyStart {
     if (_proxyRunning && [self isSingboxProcessAlive]) {
+        [[BulletinManager sharedManager] updateSingleBannerWithContent:
+            [NSString stringWithFormat:@"🛡️ Proxy đang chạy (PID %d)", _singboxPid]
+            badgeCount:0 userInfo:nil];
         return jsonResponse(@{@"ok": @YES, @"message": @"Proxy already running", @"pid": @(_singboxPid)});
     }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *ip = [defaults stringForKey:kProxyIP];
     if (!ip || ip.length == 0) {
+        [[BulletinManager sharedManager] popBannerWithContent:@"❌ Chưa có proxy config" userInfo:nil];
         return jsonResponse(@{@"error": @"No proxy config. Call /api/proxy/config first"});
     }
 
@@ -858,8 +867,11 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     // Check binary exists
     if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) {
         NSLog(@"[PhoneClawAPI] sing-box binary not found at %@", binaryPath);
+        [[BulletinManager sharedManager] popBannerWithContent:@"❌ sing-box binary không tìm thấy" userInfo:nil];
         return jsonResponse(@{@"error": @"sing-box binary not found in app bundle"});
     }
+
+    [[BulletinManager sharedManager] updateSingleBannerWithContent:@"⏳ Đang khởi động proxy..." badgeCount:1 userInfo:nil];
 
     // Spawn sing-box process
     pid_t pid = fork();
@@ -880,7 +892,7 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
         [defaults setBool:YES forKey:kProxyEnabled];
         [defaults synchronize];
 
-        NSLog(@"[PhoneClawAPI] sing-box started with PID %d", pid);
+        NSLog(@"[PhoneClawAPI] sing-box started with PID %d, verifying...", pid);
 
         // Monitor process in background
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -891,12 +903,36 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
                 self->_proxyRunning = NO;
                 self->_singboxPid = 0;
                 self->_proxyStartTime = nil;
+                // Notify user that proxy died unexpectedly
+                [[BulletinManager sharedManager] popBannerWithContent:
+                    [NSString stringWithFormat:@"❌ Proxy đã dừng đột ngột (exit code %d)", WEXITSTATUS(status)]
+                    userInfo:nil];
             }
         });
 
-        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy tunnel started"});
+        // Wait briefly to verify sing-box didn't crash immediately
+        usleep(1500000); // 1.5 seconds
+
+        if (![self isSingboxProcessAlive]) {
+            _proxyRunning = NO;
+            _singboxPid = 0;
+            _proxyStartTime = nil;
+            [defaults setBool:NO forKey:kProxyEnabled];
+            [defaults synchronize];
+            NSLog(@"[PhoneClawAPI] sing-box crashed immediately after start");
+            [[BulletinManager sharedManager] popBannerWithContent:
+                @"❌ Proxy không thể khởi động (sing-box crashed)" userInfo:nil];
+            return jsonResponse(@{@"ok": @NO, @"error": @"sing-box crashed immediately after start — check config or permissions"});
+        }
+
+        NSString *proxyInfo = [NSString stringWithFormat:@"🛡️ Proxy đã bật — %@:%ld (PID %d)",
+            ip, (long)[defaults integerForKey:kProxyPort], pid];
+        [[BulletinManager sharedManager] popBannerWithContent:proxyInfo userInfo:nil];
+
+        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy tunnel started and verified"});
     } else {
         NSLog(@"[PhoneClawAPI] Failed to fork sing-box process");
+        [[BulletinManager sharedManager] popBannerWithContent:@"❌ Không thể khởi động proxy (fork failed)" userInfo:nil];
         return jsonResponse(@{@"error": @"Failed to start sing-box (fork failed)"});
     }
 }
@@ -906,6 +942,7 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
         _proxyRunning = NO;
         _singboxPid = 0;
         _proxyStartTime = nil;
+        [[BulletinManager sharedManager] updateSingleBannerWithContent:@"🛑 Proxy đã tắt" badgeCount:0 userInfo:nil];
         return jsonResponse(@{@"ok": @YES, @"message": @"Proxy not running"});
     }
 
@@ -935,6 +972,8 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
     NSLog(@"[PhoneClawAPI] All spoofing disabled (proxy stopped)");
 
+    [[BulletinManager sharedManager] popBannerWithContent:@"🛑 Proxy đã tắt, spoof đã reset" userInfo:nil];
+
     return jsonResponse(@{@"ok": @YES, @"message": @"Proxy stopped, spoofing disabled", @"pid": @(stoppedPid)});
 }
 
@@ -950,6 +989,8 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
         [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
         [applied addObject:[NSString stringWithFormat:@"mode=%@ (all spoofing disabled)", mode]];
         NSLog(@"[PhoneClawAPI] Mode=%@ — all spoofing disabled (natural device state)", mode);
+        [[BulletinManager sharedManager] updateSingleBannerWithContent:
+            [NSString stringWithFormat:@"🔓 Spoof tắt (mode=%@)", mode] badgeCount:0 userInfo:nil];
         return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": mode});
     }
 
@@ -1010,6 +1051,11 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     [applied addObject:@"cellular=US(310/260)"];
 
     [defaults synchronize];
+
+    [[BulletinManager sharedManager] popBannerWithContent:
+        [NSString stringWithFormat:@"🇺🇸 US Spoof: %@ | GPS | WiFi ẩn | Cell US",
+            params[@"timezone"] ?: @"auto"] userInfo:nil];
+
     return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": @"us"});
 }
 
