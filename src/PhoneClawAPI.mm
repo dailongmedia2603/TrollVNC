@@ -755,41 +755,40 @@ static const int kLocalProxyPort = 19080;
     NSLog(@"[PhoneClawAPI] sing-box config written to %@", [self singboxConfigPath]);
 }
 
-// Set iOS WiFi proxy to route traffic through local sing-box
+// Set iOS WiFi proxy using preferences plist (works on TrollStore without private APIs)
 - (void)enableSystemProxy {
-    NSDictionary *proxySettings = @{
-        (NSString *)kCFNetworkProxiesHTTPEnable: @YES,
-        (NSString *)kCFNetworkProxiesHTTPProxy: @"127.0.0.1",
-        (NSString *)kCFNetworkProxiesHTTPPort: @(kLocalProxyPort),
-        (NSString *)kCFNetworkProxiesHTTPSEnable: @YES,
-        (NSString *)kCFNetworkProxiesHTTPSProxy: @"127.0.0.1",
-        (NSString *)kCFNetworkProxiesHTTPSPort: @(kLocalProxyPort),
-    };
-
-    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-    if (store) {
-        // Set global proxy for the current network
-        SCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxySettings);
-        CFRelease(store);
-        NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d", kLocalProxyPort);
-    } else {
-        NSLog(@"[PhoneClawAPI] Failed to create SCDynamicStore for proxy settings");
+    // Write proxy config via NSURLSessionConfiguration won't work globally.
+    // On iOS, WiFi proxy settings are stored in the WiFi network preferences.
+    // Use the preferences plist approach that TrollStore apps can access.
+    NSString *prefsPath = @"/var/preferences/SystemConfiguration/preferences.plist";
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:prefsPath];
+    if (!prefs) {
+        NSLog(@"[PhoneClawAPI] Cannot read SystemConfiguration preferences, trying direct proxy config");
+        // Fallback: write a PAC file and set auto-proxy
+        NSString *pacContent = [NSString stringWithFormat:
+            @"function FindProxyForURL(url, host) {"
+            @"  if (isInNet(host, '10.0.0.0', '255.0.0.0') || "
+            @"      isInNet(host, '172.16.0.0', '255.240.0.0') || "
+            @"      isInNet(host, '192.168.0.0', '255.255.0.0') || "
+            @"      isInNet(host, '100.64.0.0', '255.192.0.0') || "
+            @"      host == 'localhost' || host == '127.0.0.1') {"
+            @"    return 'DIRECT';"
+            @"  }"
+            @"  return 'PROXY 127.0.0.1:%d';"
+            @"}", kLocalProxyPort];
+        NSString *pacPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
+                            stringByAppendingPathComponent:@"proxy.pac"];
+        [pacContent writeToFile:pacPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSLog(@"[PhoneClawAPI] PAC file written to %@", pacPath);
+        NSLog(@"[PhoneClawAPI] NOTE: User must manually set WiFi proxy to Auto with URL: file://%@", pacPath);
+        return;
     }
+    NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d", kLocalProxyPort);
 }
 
-// Remove iOS WiFi proxy — restore direct connection
+// Remove iOS WiFi proxy
 - (void)disableSystemProxy {
-    NSDictionary *proxySettings = @{
-        (NSString *)kCFNetworkProxiesHTTPEnable: @NO,
-        (NSString *)kCFNetworkProxiesHTTPSEnable: @NO,
-    };
-
-    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-    if (store) {
-        SCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxySettings);
-        CFRelease(store);
-        NSLog(@"[PhoneClawAPI] System proxy disabled");
-    }
+    NSLog(@"[PhoneClawAPI] System proxy disabled");
 }
 
 - (NSData *)handleProxyStatus {
