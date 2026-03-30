@@ -1356,14 +1356,40 @@ static BOOL _scLoaded = NO;
     NSString *mode = params[@"mode"] ?: [defaults stringForKey:kProxyMode] ?: @"none";
     NSMutableArray *applied = [NSMutableArray array];
 
-    // Mode "none" or "vn" → disable all spoofing, restore natural state
-    if ([mode isEqualToString:@"none"] || [mode isEqualToString:@"vn"]) {
+    // Mode "none" → disable all spoofing, restore natural state
+    if ([mode isEqualToString:@"none"]) {
         [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
-        [applied addObject:[NSString stringWithFormat:@"mode=%@ (all spoofing disabled)", mode]];
-        NSLog(@"[PhoneClawAPI] Mode=%@ — all spoofing disabled (natural device state)", mode);
+        [applied addObject:@"all spoofing disabled"];
+        NSLog(@"[PhoneClawAPI] Mode=none — all spoofing disabled");
         [[BulletinManager sharedManager] updateSingleBannerWithContent:
-            [NSString stringWithFormat:@"🔓 Spoof tắt (mode=%@)", mode] badgeCount:0 userInfo:nil];
+            @"🔓 Spoof tắt" badgeCount:0 userInfo:nil];
         return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": mode});
+    }
+
+    // Mode "vn" → GPS khớp proxy VN + WiFi BSSID ẩn, giữ locale/timezone/cell VN tự nhiên
+    if ([mode isEqualToString:@"vn"]) {
+        // GPS spoof nếu Dashboard gửi tọa độ từ geolocate
+        NSNumber *lat = params[@"latitude"];
+        NSNumber *lon = params[@"longitude"];
+        if (lat && lon) {
+            double latitude = [lat doubleValue];
+            double longitude = [lon doubleValue];
+            [defaults setDouble:latitude forKey:kSpoofLat];
+            [defaults setDouble:longitude forKey:kSpoofLon];
+            [[DeviceSpoofer sharedSpoofer] startLocationSpoofWithLatitude:latitude longitude:longitude];
+            [applied addObject:[NSString stringWithFormat:@"gps=%.4f,%.4f", latitude, longitude]];
+        }
+
+        // WiFi BSSID ẩn — tránh lộ 100 máy cùng router
+        [[DeviceSpoofer sharedSpoofer] startWiFiSpoof];
+        [applied addObject:@"wifi_bssid=hidden"];
+
+        // KHÔNG spoof: timezone, locale, cell — giữ VN tự nhiên
+        [defaults synchronize];
+
+        [[BulletinManager sharedManager] popBannerWithContent:
+            @"🇻🇳 VN Spoof: GPS khớp proxy | WiFi ẩn" badgeCount:0 userInfo:nil];
+        return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": @"vn"});
     }
 
     // Mode "us" → enable full US spoofing
