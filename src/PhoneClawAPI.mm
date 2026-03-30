@@ -18,6 +18,7 @@
 #import <Photos/Photos.h>
 #include <atomic>
 #include <dlfcn.h>
+#include <spawn.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -856,19 +857,20 @@ static BOOL _scLoaded = NO;
     }
 
     // Kill wifid — launchd restarts it automatically, picks up new plist
-    // Use system() with killall since pgrep may not exist on iOS
-    int ret = system("killall -TERM wifid 2>/dev/null");
+    // Use posix_spawn since system() is unavailable on iOS SDK
+    pid_t spawnPid = 0;
+    const char *argv[] = {"/usr/bin/killall", "-TERM", "wifid", NULL};
+    extern char **environ;
+    int ret = posix_spawn(&spawnPid, "/usr/bin/killall", NULL, NULL, (char *const *)argv, environ);
     if (ret == 0) {
-        NSLog(@"[PhoneClawAPI] wifid killed, launchd will restart it");
-        return YES;
+        int status;
+        waitpid(spawnPid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            NSLog(@"[PhoneClawAPI] wifid killed, launchd will restart it");
+            return YES;
+        }
     }
-    // Fallback: try by path
-    ret = system("killall -TERM /usr/sbin/wifid 2>/dev/null");
-    if (ret == 0) {
-        NSLog(@"[PhoneClawAPI] wifid killed (by path)");
-        return YES;
-    }
-    NSLog(@"[PhoneClawAPI] Could not kill wifid (ret=%d)", ret);
+    NSLog(@"[PhoneClawAPI] Could not kill wifid (spawn ret=%d)", ret);
     return NO;
 }
 
