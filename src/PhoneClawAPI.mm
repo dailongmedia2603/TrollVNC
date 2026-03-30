@@ -1136,9 +1136,26 @@ static BOOL _scLoaded = NO;
 
 // ============================================================
 // Clear Photos — Xoá toàn bộ ảnh/video + dọn thùng rác
-// Bước 1: deleteAssets (all) → Recently Deleted
-// Bước 2: deleteAssets (trashed) → Xoá vĩnh viễn
+// Bước 1: deleteAssets (all) → popup → auto-tap Delete
+// Bước 2: deleteAssets (trashed) → popup → auto-tap Delete
 // ============================================================
+
+// Auto-tap "Delete" button trên system confirmation dialog.
+// Trên iPhone 7 Plus (375x667 points), nút "Delete" ở bên phải alert:
+// khoảng x=0.67, y=0.53 (tùy số dòng text trong alert)
+- (void)autoTapDeleteConfirmation {
+    // Thử tap 2 vị trí phổ biến của nút Delete trên iOS alert
+    // Vị trí 1: Alert 2 nút cạnh nhau (Don't Allow | Delete)
+    CGPoint deleteBtn = normalizedToDevicePoint(0.67, 0.53);
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [[STHIDEventGenerator sharedGenerator] sendTaps:1
+                                               location:deleteBtn
+                                        numberOfTouches:1
+                                       delayBetweenTaps:0.05];
+    });
+    NSLog(@"[PhoneClawAPI] clear-photos: auto-tapped Delete at (0.67, 0.53)");
+}
+
 - (NSData *)handleClearPhotos {
     NSLog(@"[PhoneClawAPI] clear-photos: starting...");
 
@@ -1146,7 +1163,7 @@ static BOOL _scLoaded = NO;
         @"🗑️ Đang xoá Photos..." badgeCount:1 userInfo:nil];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Bước 1: Xoá tất cả assets → chuyển vào Recently Deleted
+        // === Bước 1: Xoá tất cả assets (→ Recently Deleted) ===
         PHFetchResult<PHAsset *> *allAssets = [PHAsset fetchAssetsWithOptions:nil];
         NSUInteger totalCount = allAssets.count;
 
@@ -1156,55 +1173,77 @@ static BOOL _scLoaded = NO;
                 [PHAssetChangeRequest deleteAssets:allAssets];
             } completionHandler:^(BOOL success, NSError *error) {
                 if (success) {
-                    NSLog(@"[PhoneClawAPI] clear-photos: %lu assets moved to trash",
+                    NSLog(@"[PhoneClawAPI] clear-photos step 1: %lu assets deleted",
                           (unsigned long)totalCount);
                 } else {
                     NSLog(@"[PhoneClawAPI] clear-photos step 1 error: %@", error);
                 }
                 dispatch_semaphore_signal(sem1);
             }];
-            dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+
+            // Đợi popup hiện → auto-tap "Delete"
+            usleep(1500000); // 1.5s cho popup hiện
+            [self autoTapDeleteConfirmation];
+
+            // Đợi deletion hoàn tất
+            dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
         }
 
-        // Đợi Photos DB cập nhật
-        usleep(1000000);
+        NSLog(@"[PhoneClawAPI] clear-photos: step 1 done, waiting for trash sync...");
+        usleep(3000000); // 3s cho Photos DB cập nhật thùng rác
 
-        // Bước 2: Dọn sạch "Đã xoá gần đây" → xoá vĩnh viễn
-        // subtype 1000000201 = Recently Deleted (private, not in public SDK headers)
+        // === Bước 2: Dọn sạch "Đã xoá gần đây" → xoá vĩnh viễn ===
+        // subtype 1000000201 = Recently Deleted (private)
         PHFetchResult<PHAssetCollection *> *trashAlbums =
             [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
                                                     subtype:(PHAssetCollectionSubtype)1000000201
                                                     options:nil];
         PHAssetCollection *recentlyDeleted = trashAlbums.firstObject;
+        NSUInteger trashedCount = 0;
 
         if (recentlyDeleted) {
             PHFetchResult<PHAsset *> *trashedAssets =
                 [PHAsset fetchAssetsInAssetCollection:recentlyDeleted options:nil];
+            trashedCount = trashedAssets.count;
 
-            if (trashedAssets.count > 0) {
+            if (trashedCount > 0) {
+                NSLog(@"[PhoneClawAPI] clear-photos step 2: purging %lu trashed assets...",
+                      (unsigned long)trashedCount);
+
                 dispatch_semaphore_t sem2 = dispatch_semaphore_create(0);
                 [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
                     [PHAssetChangeRequest deleteAssets:trashedAssets];
                 } completionHandler:^(BOOL success, NSError *error) {
                     if (success) {
-                        NSLog(@"[PhoneClawAPI] clear-photos: %lu trashed assets purged",
-                              (unsigned long)trashedAssets.count);
+                        NSLog(@"[PhoneClawAPI] clear-photos step 2: %lu trashed assets purged",
+                              (unsigned long)trashedCount);
                     } else {
                         NSLog(@"[PhoneClawAPI] clear-photos step 2 error: %@", error);
                     }
                     dispatch_semaphore_signal(sem2);
                 }];
-                dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+
+                // Đợi popup hiện → auto-tap "Delete"
+                usleep(1500000);
+                [self autoTapDeleteConfirmation];
+
+                dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+            } else {
+                NSLog(@"[PhoneClawAPI] clear-photos step 2: Recently Deleted is empty");
             }
+        } else {
+            NSLog(@"[PhoneClawAPI] clear-photos step 2: Recently Deleted album not found");
         }
 
-        NSLog(@"[PhoneClawAPI] clear-photos: done — %lu assets deleted", (unsigned long)totalCount);
+        NSLog(@"[PhoneClawAPI] clear-photos: DONE — %lu assets + %lu trashed purged",
+              (unsigned long)totalCount, (unsigned long)trashedCount);
         [[BulletinManager sharedManager] popBannerWithContent:
-            [NSString stringWithFormat:@"✅ Đã xoá %lu ảnh/video", (unsigned long)totalCount]
+            [NSString stringWithFormat:@"✅ Đã xoá %lu ảnh/video + %lu thùng rác",
+                (unsigned long)totalCount, (unsigned long)trashedCount]
             userInfo:nil];
     });
 
-    return jsonResponse(@{@"ok": @YES, @"message": @"Clearing photos in background..."});
+    return jsonResponse(@{@"ok": @YES, @"message": @"Clearing photos + trash in background..."});
 }
 
 - (NSData *)handleProxyStatus {
