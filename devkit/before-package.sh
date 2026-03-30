@@ -43,32 +43,5 @@ cp -rp "$THEOS_STAGING_DIR/usr/share/trollvnc/webclients" "$THEOS_STAGING_DIR/Ap
 rm -rf "${THEOS_STAGING_DIR:?}/usr"
 rm -rf "${THEOS_STAGING_DIR:?}/Library"
 
-# Build and bundle PacketTunnel.appex (VPN Network Extension)
-EXTENSION_SRC="PacketTunnel/PacketTunnelProvider.m"
-if [ -f "$EXTENSION_SRC" ]; then
-    APPEX_DIR="$THEOS_STAGING_DIR/Applications/TrollVNC.app/PlugIns/PacketTunnel.appex"
-    mkdir -p "$APPEX_DIR"
-
-    # Compile extension with clang
-    SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk")
-    clang -target arm64-apple-ios15.0 \
-        -isysroot "$SDKROOT" \
-        -framework NetworkExtension -framework Foundation \
-        -fobjc-arc \
-        -e _NSExtensionMain \
-        -o "$APPEX_DIR/PacketTunnel" \
-        "$EXTENSION_SRC"
-
-    # Copy Info.plist
-    cp PacketTunnel/Info.plist "$APPEX_DIR/"
-
-    # Sign extension with its own entitlements
-    ldid -SPacketTunnel/PacketTunnel.entitlements "$APPEX_DIR/PacketTunnel"
-
-    echo "[before-package] PacketTunnel.appex built and signed"
-else
-    echo "[before-package] WARNING: PacketTunnel source not found, VPN extension not bundled"
-fi
-
 # Pseudo code signing
 ldid -Sapp/TrollVNC/TrollVNC/TrollVNC.entitlements "$THEOS_STAGING_DIR/Applications/TrollVNC.app"
