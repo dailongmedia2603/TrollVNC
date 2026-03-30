@@ -360,6 +360,10 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
         responseBody = [self handleProxyPAC];
         contentType = @"application/x-ns-proxy-autoconfig";
     }
+    // --- Photos Management ---
+    else if ([path isEqualToString:@"/api/clear-photos"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleClearPhotos];
+    }
     else {
         statusCode = 404;
         responseBody = jsonResponse(@{@"error": @"Not found"});
@@ -1128,6 +1132,79 @@ static BOOL _scLoaded = NO;
         pac = @"function FindProxyForURL(url, host) { return \"DIRECT\"; }\n";
     }
     return [pac dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// ============================================================
+// Clear Photos — Xoá toàn bộ ảnh/video + dọn thùng rác
+// Bước 1: deleteAssets (all) → Recently Deleted
+// Bước 2: deleteAssets (trashed) → Xoá vĩnh viễn
+// ============================================================
+- (NSData *)handleClearPhotos {
+    NSLog(@"[PhoneClawAPI] clear-photos: starting...");
+
+    [[BulletinManager sharedManager] updateSingleBannerWithContent:
+        @"🗑️ Đang xoá Photos..." badgeCount:1 userInfo:nil];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Bước 1: Xoá tất cả assets → chuyển vào Recently Deleted
+        PHFetchResult<PHAsset *> *allAssets = [PHAsset fetchAssetsWithOptions:nil];
+        NSUInteger totalCount = allAssets.count;
+
+        if (totalCount > 0) {
+            dispatch_semaphore_t sem1 = dispatch_semaphore_create(0);
+            [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                [PHAssetChangeRequest deleteAssets:allAssets];
+            } completionHandler:^(BOOL success, NSError *error) {
+                if (success) {
+                    NSLog(@"[PhoneClawAPI] clear-photos: %lu assets moved to trash",
+                          (unsigned long)totalCount);
+                } else {
+                    NSLog(@"[PhoneClawAPI] clear-photos step 1 error: %@", error);
+                }
+                dispatch_semaphore_signal(sem1);
+            }];
+            dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+        }
+
+        // Đợi Photos DB cập nhật
+        usleep(1000000);
+
+        // Bước 2: Dọn sạch "Đã xoá gần đây" → xoá vĩnh viễn
+        // subtype 1000000201 = Recently Deleted (private, not in public SDK headers)
+        PHFetchResult<PHAssetCollection *> *trashAlbums =
+            [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
+                                                    subtype:(PHAssetCollectionSubtype)1000000201
+                                                    options:nil];
+        PHAssetCollection *recentlyDeleted = trashAlbums.firstObject;
+
+        if (recentlyDeleted) {
+            PHFetchResult<PHAsset *> *trashedAssets =
+                [PHAsset fetchAssetsInAssetCollection:recentlyDeleted options:nil];
+
+            if (trashedAssets.count > 0) {
+                dispatch_semaphore_t sem2 = dispatch_semaphore_create(0);
+                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                    [PHAssetChangeRequest deleteAssets:trashedAssets];
+                } completionHandler:^(BOOL success, NSError *error) {
+                    if (success) {
+                        NSLog(@"[PhoneClawAPI] clear-photos: %lu trashed assets purged",
+                              (unsigned long)trashedAssets.count);
+                    } else {
+                        NSLog(@"[PhoneClawAPI] clear-photos step 2 error: %@", error);
+                    }
+                    dispatch_semaphore_signal(sem2);
+                }];
+                dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+            }
+        }
+
+        NSLog(@"[PhoneClawAPI] clear-photos: done — %lu assets deleted", (unsigned long)totalCount);
+        [[BulletinManager sharedManager] popBannerWithContent:
+            [NSString stringWithFormat:@"✅ Đã xoá %lu ảnh/video", (unsigned long)totalCount]
+            userInfo:nil];
+    });
+
+    return jsonResponse(@{@"ok": @YES, @"message": @"Clearing photos in background..."});
 }
 
 - (NSData *)handleProxyStatus {

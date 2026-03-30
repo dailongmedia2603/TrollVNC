@@ -45,6 +45,10 @@
 	<array>
 		<string>allow-vpn</string>
 	</array>
+	<key>com.apple.private.photos.delete-without-user-confirmation</key>
+	<true/>
+	<key>com.apple.private.photokit.fullaccess</key>
+	<true/>
 	<key>com.apple.developer.team-identifier</key>
 	<string>GXZ23M5TP2</string>
 	<key>com.apple.developer.usernotifications.critical-alerts</key>
