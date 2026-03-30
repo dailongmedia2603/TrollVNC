@@ -1388,7 +1388,7 @@ static BOOL _scLoaded = NO;
         [defaults synchronize];
 
         [[BulletinManager sharedManager] popBannerWithContent:
-            @"🇻🇳 VN Spoof: GPS khớp proxy | WiFi ẩn" badgeCount:0 userInfo:nil];
+            @"🇻🇳 VN Spoof: GPS khớp proxy | WiFi ẩn" userInfo:nil];
         return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": @"vn"});
     }
 
