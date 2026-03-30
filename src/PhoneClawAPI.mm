@@ -362,7 +362,7 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     }
     // --- Photos Management ---
     else if ([path isEqualToString:@"/api/clear-photos"] && [method isEqualToString:@"POST"]) {
-        responseBody = [self handleClearPhotos];
+        responseBody = [self handleClearPhotos:parseJSON(bodyData)];
     }
     else {
         statusCode = 404;
@@ -1141,23 +1141,34 @@ static BOOL _scLoaded = NO;
 // ============================================================
 
 // Auto-tap "Delete" button trên system confirmation dialog.
-// Trên iPhone 7 Plus (375x667 points), nút "Delete" ở bên phải alert:
-// khoảng x=0.67, y=0.53 (tùy số dòng text trong alert)
-- (void)autoTapDeleteConfirmation {
-    // Thử tap 2 vị trí phổ biến của nút Delete trên iOS alert
-    // Vị trí 1: Alert 2 nút cạnh nhau (Don't Allow | Delete)
-    CGPoint deleteBtn = normalizedToDevicePoint(0.67, 0.53);
+// Dùng RAW device points (UIScreen bounds) — KHÔNG qua VNC rotation transform.
+// System alert luôn portrait bất kể VNC orientation.
+// Tap vào nút Delete trên popup xác nhận xoá Photos
+// Tọa độ normalized (0-1) từ Dashboard, chuyển thành raw device points
+- (void)autoTapDeleteAtX:(CGFloat)nx y:(CGFloat)ny {
+    CGFloat sw = (CGFloat)gSrcWidth;
+    CGFloat sh = (CGFloat)gSrcHeight;
+    CGPoint deleteBtn = CGPointMake(sw * nx, sh * ny);
+
+    NSLog(@"[PhoneClawAPI] clear-photos: tapping Delete at (%.0f, %.0f) normalized=(%.2f, %.2f) device=(%d x %d)",
+          deleteBtn.x, deleteBtn.y, nx, ny, gSrcWidth, gSrcHeight);
+
     dispatch_sync(dispatch_get_main_queue(), ^{
         [[STHIDEventGenerator sharedGenerator] sendTaps:1
                                                location:deleteBtn
                                         numberOfTouches:1
                                        delayBetweenTaps:0.05];
     });
-    NSLog(@"[PhoneClawAPI] clear-photos: auto-tapped Delete at (0.67, 0.53)");
 }
 
-- (NSData *)handleClearPhotos {
+- (NSData *)handleClearPhotos:(NSDictionary *)params {
     NSLog(@"[PhoneClawAPI] clear-photos: starting...");
+
+    // Tọa độ nút Delete từ Dashboard (normalized 0-1)
+    CGFloat delX = params[@"deleteX"] ? [params[@"deleteX"] doubleValue] : 0.75;
+    CGFloat delY = params[@"deleteY"] ? [params[@"deleteY"] doubleValue] : 0.53;
+    CGFloat trashDelX = params[@"trashDeleteX"] ? [params[@"trashDeleteX"] doubleValue] : 0.75;
+    CGFloat trashDelY = params[@"trashDeleteY"] ? [params[@"trashDeleteY"] doubleValue] : 0.53;
 
     [[BulletinManager sharedManager] updateSingleBannerWithContent:
         @"🗑️ Đang xoá Photos..." badgeCount:1 userInfo:nil];
@@ -1182,8 +1193,8 @@ static BOOL _scLoaded = NO;
             }];
 
             // Đợi popup hiện → auto-tap "Delete"
-            usleep(1500000); // 1.5s cho popup hiện
-            [self autoTapDeleteConfirmation];
+            usleep(2000000); // 2s cho popup hiện
+            [self autoTapDeleteAtX:delX y:delY];
 
             // Đợi deletion hoàn tất
             dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
@@ -1223,9 +1234,9 @@ static BOOL _scLoaded = NO;
                     dispatch_semaphore_signal(sem2);
                 }];
 
-                // Đợi popup hiện → auto-tap "Delete"
-                usleep(1500000);
-                [self autoTapDeleteConfirmation];
+                // Đợi popup hiện → auto-tap "Delete" (tọa độ thùng rác riêng)
+                usleep(2000000);
+                [self autoTapDeleteAtX:trashDelX y:trashDelY];
 
                 dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
             } else {
