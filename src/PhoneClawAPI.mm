@@ -196,6 +196,7 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
 
     int yes = 1;
     setsockopt(_serverSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(_serverSocket, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
 
     // Allow IPv4 connections on IPv6 socket
     int no = 0;
@@ -1263,21 +1264,51 @@ static BOOL _scLoaded = NO;
     if (!ip || ip.length == 0) return;
 
     NSString *mode = [defaults stringForKey:kProxyMode] ?: @"none";
-    if ([mode isEqualToString:@"none"]) return; // No proxy mode → do nothing
+    if ([mode isEqualToString:@"none"]) return;
 
-    NSLog(@"[PhoneClawAPI] Auto-starting proxy (mode=%@)", mode);
-    [self handleProxyStart];
+    NSLog(@"[PhoneClawAPI] Auto-starting proxy (mode=%@) — sing-box only, NO WiFi proxy change", mode);
 
-    // Re-apply spoof settings based on mode
+    // Only start sing-box process, do NOT call enableSystemProxy.
+    // WiFi proxy will be set by Dashboard via handleProxyStart when user explicitly triggers it.
+    // This prevents crash-loop: autoStart → enableSystemProxy → kill wifid → WiFi drops → app restarts → loop.
+    [self writeSingboxConfig];
+
+    NSString *binaryPath = [self singboxBinaryPath];
+    NSString *configPath = [self singboxConfigPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) return;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char *args[] = { [binaryPath UTF8String], "run", "-c", [configPath UTF8String], NULL };
+        execv(args[0], (char *const *)args);
+        _exit(1);
+    } else if (pid > 0) {
+        _singboxPid = pid;
+        _proxyRunning = YES;
+        _proxyStartTime = [NSDate date];
+
+        // Monitor in background
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            int status;
+            waitpid(pid, &status, 0);
+            if (self->_singboxPid == pid) {
+                self->_proxyRunning = NO;
+                self->_singboxPid = 0;
+                self->_proxyStartTime = nil;
+            }
+        });
+
+        NSLog(@"[PhoneClawAPI] sing-box auto-started with PID %d", pid);
+    }
+
+    // Re-apply spoof settings (these don't affect WiFi/Tailscale)
     NSMutableDictionary *spoofParams = [NSMutableDictionary dictionary];
     spoofParams[@"mode"] = mode;
-
     if ([mode isEqualToString:@"us"]) {
         NSString *tz = [defaults stringForKey:kSpoofTimezone];
         NSString *locale = [defaults stringForKey:kSpoofLocale];
         double lat = [defaults doubleForKey:kSpoofLat];
         double lon = [defaults doubleForKey:kSpoofLon];
-
         if (tz) spoofParams[@"timezone"] = tz;
         if (locale) spoofParams[@"locale"] = locale;
         if (lat != 0 || lon != 0) {
@@ -1285,7 +1316,6 @@ static BOOL _scLoaded = NO;
             spoofParams[@"longitude"] = @(lon);
         }
     }
-    // For "vn" mode, spoofParams only has mode="vn" → handleProxySpoof will disable all spoofing
     [self handleProxySpoof:spoofParams];
 }
 
