@@ -355,6 +355,11 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     else if ([path isEqualToString:@"/api/proxy/spoof"] && [method isEqualToString:@"POST"]) {
         responseBody = [self handleProxySpoof:parseJSON(bodyData)];
     }
+    // --- PAC (Proxy Auto-Configuration) ---
+    else if ([path isEqualToString:@"/proxy.pac"] && [method isEqualToString:@"GET"]) {
+        responseBody = [self handleProxyPAC];
+        contentType = @"application/x-ns-proxy-autoconfig";
+    }
     else {
         statusCode = 404;
         responseBody = jsonResponse(@{@"error": @"Not found"});
@@ -1098,6 +1103,27 @@ static BOOL _scLoaded = NO;
 
     NSLog(@"[PhoneClawAPI] disableSystemProxy complete: scPrefs=%@ verified=%@",
           scpOk ? @"Y" : @"N", verified ? @"Y" : @"N");
+}
+
+- (NSData *)handleProxyPAC {
+    // PAC file: returns PROXY when sing-box is running, DIRECT when not.
+    // User sets WiFi → Automatic → http://127.0.0.1:<apiPort>/proxy.pac ONE TIME.
+    // After that, proxy auto-activates/deactivates with Dashboard control.
+    NSString *pac;
+    if (_proxyRunning && [self isSingboxProcessAlive]) {
+        pac = [NSString stringWithFormat:
+            @"function FindProxyForURL(url, host) {\n"
+            @"  if (isInNet(host, \"127.0.0.0\", \"255.0.0.0\")) return \"DIRECT\";\n"
+            @"  if (isInNet(host, \"10.0.0.0\", \"255.0.0.0\")) return \"DIRECT\";\n"
+            @"  if (isInNet(host, \"172.16.0.0\", \"255.240.0.0\")) return \"DIRECT\";\n"
+            @"  if (isInNet(host, \"192.168.0.0\", \"255.255.0.0\")) return \"DIRECT\";\n"
+            @"  if (isInNet(host, \"100.64.0.0\", \"255.192.0.0\")) return \"DIRECT\";\n"
+            @"  return \"PROXY 127.0.0.1:%d\";\n"
+            @"}\n", kLocalProxyPort];
+    } else {
+        pac = @"function FindProxyForURL(url, host) { return \"DIRECT\"; }\n";
+    }
+    return [pac dataUsingEncoding:NSUTF8StringEncoding];
 }
 
 - (NSData *)handleProxyStatus {
