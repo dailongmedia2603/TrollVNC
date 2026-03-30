@@ -729,8 +729,12 @@ static const int kLocalProxyPort = 19080;
     NSString *pass = [defaults stringForKey:kProxyPass] ?: @"";
 
     // Use "mixed" inbound (HTTP+SOCKS5 local proxy) instead of TUN.
-    // TUN requires root/jailbreak which TrollStore doesn't provide.
-    // After sing-box starts, we set iOS WiFi proxy to 127.0.0.1:kLocalProxyPort.
+    // After sing-box starts, iOS WiFi PAC routes traffic to 127.0.0.1:kLocalProxyPort.
+    // Outbound type: "http" for US proxies, "socks" for VN proxies (auto-detect by mode).
+    NSString *mode = [defaults stringForKey:kProxyMode] ?: @"us";
+    NSString *outboundType = [mode isEqualToString:@"vn"] ? @"socks" : @"http";
+    NSLog(@"[PhoneClawAPI] sing-box outbound type: %@ (mode=%@)", outboundType, mode);
+
     NSDictionary *config = @{
         @"log": @{@"level": @"info", @"timestamp": @YES},
         @"inbounds": @[@{
@@ -741,8 +745,8 @@ static const int kLocalProxyPort = 19080;
         }],
         @"outbounds": @[
             @{
-                @"type": @"http",
-                @"tag": @"us-proxy",
+                @"type": outboundType,
+                @"tag": @"proxy",
                 @"server": ip,
                 @"server_port": @(port),
                 @"username": user,
@@ -754,7 +758,7 @@ static const int kLocalProxyPort = 19080;
             @"rules": @[
                 @{@"ip_cidr": @[@"100.64.0.0/10", @"10.0.0.0/8", @"192.168.0.0/16", @"172.16.0.0/12"], @"outbound": @"direct"},
             ],
-            @"final": @"us-proxy",
+            @"final": @"proxy",
         },
     };
 
