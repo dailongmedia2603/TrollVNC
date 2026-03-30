@@ -819,7 +819,7 @@ static BOOL _scLoaded = NO;
     if (!store) return nil;
 
     // Read primary network service
-    NSDictionary *ipv4 = (NSDictionary *)_scCopyValue(store, CFSTR("State:/Network/Global/IPv4"));
+    NSDictionary *ipv4 = (__bridge NSDictionary *)_scCopyValue(store, CFSTR("State:/Network/Global/IPv4"));
     CFRelease(store);
 
     NSString *serviceID = ipv4[@"PrimaryService"];
