@@ -756,131 +756,263 @@ static const int kLocalProxyPort = 19080;
     NSLog(@"[PhoneClawAPI] sing-box config written to %@", [self singboxConfigPath]);
 }
 
-// SCDynamicStore function pointers (loaded via dlopen to bypass iOS SDK restrictions)
-// Pattern from TVNCRootListController.m — works with platform-application entitlement
-typedef void *SCDynamicStoreRef_t;
-typedef SCDynamicStoreRef_t (*SCDynamicStoreCreate_f)(CFAllocatorRef, CFStringRef, void *, void *);
-typedef Boolean (*SCDynamicStoreSetValue_f)(SCDynamicStoreRef_t, CFStringRef, CFPropertyListRef);
-
-static SCDynamicStoreCreate_f _pSCDynamicStoreCreate = NULL;
-static SCDynamicStoreSetValue_f _pSCDynamicStoreSetValue = NULL;
-static BOOL _scDynamicStoreLoaded = NO;
-
-- (BOOL)loadSCDynamicStore {
-    if (_scDynamicStoreLoaded) return (_pSCDynamicStoreCreate != NULL);
-
-    void *handle = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
-    if (handle) {
-        _pSCDynamicStoreCreate = (SCDynamicStoreCreate_f)dlsym(handle, "SCDynamicStoreCreate");
-        _pSCDynamicStoreSetValue = (SCDynamicStoreSetValue_f)dlsym(handle, "SCDynamicStoreSetValue");
-    }
-    _scDynamicStoreLoaded = YES;
-    NSLog(@"[PhoneClawAPI] SCDynamicStore loaded: create=%p setValue=%p", _pSCDynamicStoreCreate, _pSCDynamicStoreSetValue);
-    return (_pSCDynamicStoreCreate != NULL && _pSCDynamicStoreSetValue != NULL);
-}
-
-// Set iOS WiFi proxy to route traffic through local sing-box.
-// Strategy: SCDynamicStore (runtime) + WiFi plist (persistent) + fallback notification.
+// ============================================================
+// WiFi Proxy Auto-Configuration via SCPreferences API
+// Uses dlopen/dlsym to bypass iOS SDK restrictions.
+// Requires entitlements: SCPreferences-write-access, platform-application.
 // Tailscale uses utun interface → NOT affected by WiFi proxy.
-- (void)enableSystemProxy {
-    BOOL anySuccess = NO;
+// ============================================================
 
-    // Method 1: SCDynamicStore (immediate effect, may not persist)
-    if ([self loadSCDynamicStore]) {
-        NSDictionary *proxyDict = @{
-            @"HTTPEnable": @1,
-            @"HTTPProxy": @"127.0.0.1",
-            @"HTTPPort": @(kLocalProxyPort),
-            @"HTTPSEnable": @1,
-            @"HTTPSProxy": @"127.0.0.1",
-            @"HTTPSPort": @(kLocalProxyPort),
-            @"ExceptionsList": @[@"*.local", @"127.0.0.1", @"localhost", @"100.64.*", @"10.*", @"172.16.*", @"192.168.*"],
-        };
-        SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-        if (store) {
-            if (_pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict)) {
-                NSLog(@"[PhoneClawAPI] SCDynamicStore proxy set OK");
-                anySuccess = YES;
-            }
-            CFRelease(store);
-        }
-    }
+// Function pointer typedefs for SystemConfiguration APIs
+typedef void *SCDynStoreRef_t;
+typedef SCDynStoreRef_t (*fn_SCDynamicStoreCreate)(CFAllocatorRef, CFStringRef, void *, void *);
+typedef CFPropertyListRef (*fn_SCDynamicStoreCopyValue)(SCDynStoreRef_t, CFStringRef);
 
-    // Method 2: Write WiFi plist directly (persistent across WiFi reconnects)
-    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
-    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
-    if (wifiPrefs) {
-        // Find the current connected network and set proxy on it
-        NSDictionary *knownNetworks = wifiPrefs[@"List of known networks"];
-        if ([knownNetworks isKindOfClass:[NSArray class]]) {
-            NSMutableArray *networks = [NSMutableArray arrayWithArray:(NSArray *)knownNetworks];
-            for (NSUInteger i = 0; i < networks.count; i++) {
-                NSMutableDictionary *network = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
-                // Set proxy for all known networks
-                network[@"ProxyType"] = @"manual";
-                network[@"ProxyServer"] = @"127.0.0.1";
-                network[@"ProxyPort"] = @(kLocalProxyPort);
-                network[@"ProxyServerHTTPS"] = @"127.0.0.1";
-                network[@"ProxyPortHTTPS"] = @(kLocalProxyPort);
-                networks[i] = network;
-            }
-            wifiPrefs[@"List of known networks"] = networks;
-            if ([wifiPrefs writeToFile:wifiPlistPath atomically:YES]) {
-                NSLog(@"[PhoneClawAPI] WiFi plist proxy set OK (%lu networks)", (unsigned long)networks.count);
-                anySuccess = YES;
-            }
-        }
-    } else {
-        NSLog(@"[PhoneClawAPI] Cannot read WiFi plist at %@", wifiPlistPath);
-    }
+typedef void *SCPrefsRef_t;
+typedef SCPrefsRef_t (*fn_SCPreferencesCreate)(CFAllocatorRef, CFStringRef, CFStringRef);
+typedef Boolean (*fn_SCPreferencesLock)(SCPrefsRef_t, Boolean);
+typedef Boolean (*fn_SCPreferencesUnlock)(SCPrefsRef_t);
+typedef Boolean (*fn_SCPreferencesCommitChanges)(SCPrefsRef_t);
+typedef Boolean (*fn_SCPreferencesApplyChanges)(SCPrefsRef_t);
+typedef Boolean (*fn_SCPreferencesPathSetValue)(SCPrefsRef_t, CFStringRef, CFDictionaryRef);
+typedef CFDictionaryRef (*fn_SCPreferencesPathGetValue)(SCPrefsRef_t, CFStringRef);
 
-    if (anySuccess) {
-        NSLog(@"[PhoneClawAPI] System proxy set to 127.0.0.1:%d", kLocalProxyPort);
-    } else {
-        NSLog(@"[PhoneClawAPI] All proxy methods failed, manual setup needed");
-        [[BulletinManager sharedManager] updateSingleBannerWithContent:
-            [NSString stringWithFormat:@"⚠️ Set WiFi proxy: 127.0.0.1:%d", kLocalProxyPort]
-            badgeCount:0 userInfo:nil];
-    }
+// Static function pointers
+static fn_SCDynamicStoreCreate       _scCreate = NULL;
+static fn_SCDynamicStoreCopyValue    _scCopyValue = NULL;
+static fn_SCPreferencesCreate        _scpCreate = NULL;
+static fn_SCPreferencesLock          _scpLock = NULL;
+static fn_SCPreferencesUnlock        _scpUnlock = NULL;
+static fn_SCPreferencesCommitChanges _scpCommit = NULL;
+static fn_SCPreferencesApplyChanges  _scpApply = NULL;
+static fn_SCPreferencesPathSetValue  _scpPathSet = NULL;
+static fn_SCPreferencesPathGetValue  _scpPathGet = NULL;
+static BOOL _scLoaded = NO;
+
+- (BOOL)loadSystemConfiguration {
+    if (_scLoaded) return (_scpCreate != NULL);
+
+    void *h = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
+    if (!h) { _scLoaded = YES; return NO; }
+
+    _scCreate    = (fn_SCDynamicStoreCreate)dlsym(h, "SCDynamicStoreCreate");
+    _scCopyValue = (fn_SCDynamicStoreCopyValue)dlsym(h, "SCDynamicStoreCopyValue");
+    _scpCreate   = (fn_SCPreferencesCreate)dlsym(h, "SCPreferencesCreate");
+    _scpLock     = (fn_SCPreferencesLock)dlsym(h, "SCPreferencesLock");
+    _scpUnlock   = (fn_SCPreferencesUnlock)dlsym(h, "SCPreferencesUnlock");
+    _scpCommit   = (fn_SCPreferencesCommitChanges)dlsym(h, "SCPreferencesCommitChanges");
+    _scpApply    = (fn_SCPreferencesApplyChanges)dlsym(h, "SCPreferencesApplyChanges");
+    _scpPathSet  = (fn_SCPreferencesPathSetValue)dlsym(h, "SCPreferencesPathSetValue");
+    _scpPathGet  = (fn_SCPreferencesPathGetValue)dlsym(h, "SCPreferencesPathGetValue");
+
+    _scLoaded = YES;
+    NSLog(@"[PhoneClawAPI] SC loaded: prefs=%p commit=%p apply=%p dynStore=%p",
+          _scpCreate, _scpCommit, _scpApply, _scCreate);
+    return (_scpCreate != NULL && _scpCommit != NULL && _scpApply != NULL);
 }
 
-// Remove iOS WiFi proxy — restore direct connection
-- (void)disableSystemProxy {
-    // Method 1: SCDynamicStore
-    if ([self loadSCDynamicStore]) {
-        NSDictionary *proxyDict = @{
-            @"HTTPEnable": @0,
-            @"HTTPSEnable": @0,
-        };
-        SCDynamicStoreRef_t store = _pSCDynamicStoreCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-        if (store) {
-            _pSCDynamicStoreSetValue(store, CFSTR("State:/Network/Global/Proxies"), (__bridge CFDictionaryRef)proxyDict);
-            CFRelease(store);
-        }
-    }
+// Get the active WiFi network service ID from SCDynamicStore
+- (NSString *)copyActiveWiFiServiceID {
+    if (!_scCreate || !_scCopyValue) return nil;
 
-    // Method 2: Clear WiFi plist proxy
+    SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
+    if (!store) return nil;
+
+    // Read primary network service
+    NSDictionary *ipv4 = (NSDictionary *)_scCopyValue(store, CFSTR("State:/Network/Global/IPv4"));
+    CFRelease(store);
+
+    NSString *serviceID = ipv4[@"PrimaryService"];
+    if (serviceID.length > 0) {
+        NSLog(@"[PhoneClawAPI] Active WiFi service ID: %@", serviceID);
+    }
+    return serviceID;
+}
+
+// Fallback: kill wifid to force iOS reload WiFi config from plist
+- (BOOL)restartWifid {
+    NSLog(@"[PhoneClawAPI] Fallback: restarting wifid...");
+
+    // Write proxy to WiFi plist first (wifid reads this on restart)
     NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
     NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
     if (wifiPrefs) {
-        NSDictionary *knownNetworks = wifiPrefs[@"List of known networks"];
+        id knownNetworks = wifiPrefs[@"List of known networks"];
         if ([knownNetworks isKindOfClass:[NSArray class]]) {
-            NSMutableArray *networks = [NSMutableArray arrayWithArray:(NSArray *)knownNetworks];
+            NSMutableArray *networks = [NSMutableArray arrayWithArray:knownNetworks];
             for (NSUInteger i = 0; i < networks.count; i++) {
-                NSMutableDictionary *network = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
-                [network removeObjectForKey:@"ProxyType"];
-                [network removeObjectForKey:@"ProxyServer"];
-                [network removeObjectForKey:@"ProxyPort"];
-                [network removeObjectForKey:@"ProxyServerHTTPS"];
-                [network removeObjectForKey:@"ProxyPortHTTPS"];
-                networks[i] = network;
+                NSMutableDictionary *net = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
+                net[@"ProxyType"] = @"manual";
+                net[@"ProxyServer"] = @"127.0.0.1";
+                net[@"ProxyPort"] = @(kLocalProxyPort);
+                net[@"ProxyServerHTTPS"] = @"127.0.0.1";
+                net[@"ProxyPortHTTPS"] = @(kLocalProxyPort);
+                networks[i] = net;
             }
             wifiPrefs[@"List of known networks"] = networks;
             [wifiPrefs writeToFile:wifiPlistPath atomically:YES];
+            NSLog(@"[PhoneClawAPI] WiFi plist proxy written (%lu networks)", (unsigned long)networks.count);
         }
     }
 
-    NSLog(@"[PhoneClawAPI] System proxy disabled (both methods)");
+    // Find and kill wifid — launchd restarts it automatically
+    FILE *fp = popen("pgrep wifid", "r");
+    if (!fp) return NO;
+    char buf[32];
+    pid_t wifidPid = 0;
+    if (fgets(buf, sizeof(buf), fp)) {
+        wifidPid = (pid_t)atoi(buf);
+    }
+    pclose(fp);
+
+    if (wifidPid > 0) {
+        kill(wifidPid, SIGTERM);
+        NSLog(@"[PhoneClawAPI] Killed wifid PID %d, launchd will restart it", wifidPid);
+        return YES;
+    }
+    NSLog(@"[PhoneClawAPI] wifid PID not found");
+    return NO;
+}
+
+// Clear proxy from WiFi plist (used by disableSystemProxy fallback)
+- (void)clearWifiPlistProxy {
+    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
+    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
+    if (!wifiPrefs) return;
+    id knownNetworks = wifiPrefs[@"List of known networks"];
+    if (![knownNetworks isKindOfClass:[NSArray class]]) return;
+
+    NSMutableArray *networks = [NSMutableArray arrayWithArray:knownNetworks];
+    for (NSUInteger i = 0; i < networks.count; i++) {
+        NSMutableDictionary *net = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
+        [net removeObjectForKey:@"ProxyType"];
+        [net removeObjectForKey:@"ProxyServer"];
+        [net removeObjectForKey:@"ProxyPort"];
+        [net removeObjectForKey:@"ProxyServerHTTPS"];
+        [net removeObjectForKey:@"ProxyPortHTTPS"];
+        networks[i] = net;
+    }
+    wifiPrefs[@"List of known networks"] = networks;
+    [wifiPrefs writeToFile:wifiPlistPath atomically:YES];
+    NSLog(@"[PhoneClawAPI] WiFi plist proxy cleared");
+}
+
+// ============================================================
+// enableSystemProxy — Set WiFi proxy to 127.0.0.1:19080
+// Tầng 1: SCPreferences API → configd reload → immediate effect
+// Fallback: kill wifid → force WiFi plist reload
+// ============================================================
+- (void)enableSystemProxy {
+    if (![self loadSystemConfiguration]) {
+        NSLog(@"[PhoneClawAPI] SystemConfiguration unavailable");
+        // Last resort fallback
+        if (![self restartWifid]) {
+            [[BulletinManager sharedManager] updateSingleBannerWithContent:
+                [NSString stringWithFormat:@"⚠️ Set WiFi proxy thủ công: 127.0.0.1:%d", kLocalProxyPort]
+                badgeCount:0 userInfo:nil];
+        }
+        return;
+    }
+
+    // Tầng 1: SCPreferences API
+    NSString *serviceID = [self copyActiveWiFiServiceID];
+    if (!serviceID) {
+        NSLog(@"[PhoneClawAPI] No active WiFi service, trying fallback");
+        [self restartWifid];
+        return;
+    }
+
+    NSDictionary *proxyDict = @{
+        @"HTTPEnable": @1,
+        @"HTTPProxy": @"127.0.0.1",
+        @"HTTPPort": @(kLocalProxyPort),
+        @"HTTPSEnable": @1,
+        @"HTTPSProxy": @"127.0.0.1",
+        @"HTTPSPort": @(kLocalProxyPort),
+        @"ExceptionsList": @[@"*.local", @"127.0.0.1", @"localhost", @"100.64.*", @"10.*", @"172.16.*", @"192.168.*"],
+    };
+
+    // Write to Setup:/Network/Service/<ServiceID>/Proxies
+    SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
+    if (!prefs) {
+        NSLog(@"[PhoneClawAPI] SCPreferencesCreate failed, trying fallback");
+        [self restartWifid];
+        return;
+    }
+
+    // Lock → set → commit → apply → unlock
+    if (!_scpLock(prefs, TRUE)) {
+        NSLog(@"[PhoneClawAPI] SCPreferencesLock failed, trying fallback");
+        CFRelease(prefs);
+        [self restartWifid];
+        return;
+    }
+
+    NSString *path = [NSString stringWithFormat:@"/NetworkServices/%@/Proxies", serviceID];
+    BOOL setOk = _scpPathSet(prefs, (__bridge CFStringRef)path, (__bridge CFDictionaryRef)proxyDict);
+    NSLog(@"[PhoneClawAPI] SCPreferencesPathSetValue(%@): %@", path, setOk ? @"OK" : @"FAIL");
+
+    BOOL commitOk = _scpCommit(prefs);
+    NSLog(@"[PhoneClawAPI] SCPreferencesCommitChanges: %@", commitOk ? @"OK" : @"FAIL");
+
+    BOOL applyOk = _scpApply(prefs);
+    NSLog(@"[PhoneClawAPI] SCPreferencesApplyChanges: %@", applyOk ? @"OK" : @"FAIL");
+
+    _scpUnlock(prefs);
+    CFRelease(prefs);
+
+    if (setOk && commitOk && applyOk) {
+        NSLog(@"[PhoneClawAPI] WiFi proxy set via SCPreferences: 127.0.0.1:%d", kLocalProxyPort);
+    } else {
+        NSLog(@"[PhoneClawAPI] SCPreferences partially failed, trying wifid fallback");
+        [self restartWifid];
+    }
+}
+
+// ============================================================
+// disableSystemProxy — Remove WiFi proxy, restore direct connection
+// ============================================================
+- (void)disableSystemProxy {
+    if (![self loadSystemConfiguration]) {
+        [self clearWifiPlistProxy];
+        [self restartWifid];
+        return;
+    }
+
+    // Tầng 1: SCPreferences — remove proxy from active WiFi service
+    NSString *serviceID = [self copyActiveWiFiServiceID];
+    BOOL scpSuccess = NO;
+
+    if (serviceID) {
+        SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
+        if (prefs) {
+            if (_scpLock(prefs, TRUE)) {
+                NSString *path = [NSString stringWithFormat:@"/NetworkServices/%@/Proxies", serviceID];
+                // Set empty proxy (disable)
+                NSDictionary *emptyProxy = @{
+                    @"HTTPEnable": @0,
+                    @"HTTPSEnable": @0,
+                };
+                _scpPathSet(prefs, (__bridge CFStringRef)path, (__bridge CFDictionaryRef)emptyProxy);
+                BOOL commitOk = _scpCommit(prefs);
+                BOOL applyOk = _scpApply(prefs);
+                _scpUnlock(prefs);
+                scpSuccess = (commitOk && applyOk);
+                NSLog(@"[PhoneClawAPI] SCPreferences proxy disabled: commit=%d apply=%d", commitOk, applyOk);
+            }
+            CFRelease(prefs);
+        }
+    }
+
+    // Also clear WiFi plist for persistence
+    [self clearWifiPlistProxy];
+
+    if (!scpSuccess) {
+        NSLog(@"[PhoneClawAPI] SCPreferences disable failed, restarting wifid");
+        [self restartWifid];
+    }
+
+    NSLog(@"[PhoneClawAPI] System proxy disabled");
 }
 
 - (NSData *)handleProxyStatus {
