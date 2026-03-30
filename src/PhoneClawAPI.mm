@@ -1007,14 +1007,17 @@ static BOOL _scLoaded = NO;
         }
     }
 
-    // === Fallback: Kill wifid only if verification failed ===
+    // NOTE: Do NOT kill wifid here! Killing wifid drops WiFi → Tailscale drops
+    // → Dashboard loses connection → phone stuck offline.
+    // Trust that SCPreferences/SCDynamicStore/WiFi plist will take effect.
+    // Proxy will apply on next WiFi reconnect at worst.
     if (!verified) {
-        NSLog(@"[PhoneClawAPI] Proxy not verified, falling back to wifid restart...");
-        [self restartWifid];
+        NSLog(@"[PhoneClawAPI] Proxy not verified via readback, but layers A+B+C are set. "
+              "Proxy should take effect without wifid restart.");
     }
 
-    NSLog(@"[PhoneClawAPI] enableSystemProxy complete: scPrefs=%@ verified=%@ wifidKilled=%@",
-          scpOk ? @"Y" : @"N", verified ? @"Y" : @"N", verified ? @"N" : @"Y");
+    NSLog(@"[PhoneClawAPI] enableSystemProxy complete: scPrefs=%@ verified=%@",
+          scpOk ? @"Y" : @"N", verified ? @"Y" : @"N");
 }
 
 // ============================================================
