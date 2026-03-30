@@ -26,6 +26,7 @@
 #import <signal.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <CoreLocation/CoreLocation.h>
+#import <NetworkExtension/NetworkExtension.h>
 
 // SpringBoardServices launch API (available with com.apple.springboard.launchapplications entitlement)
 extern "C" int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
@@ -759,345 +760,73 @@ static const int kLocalProxyPort = 19080;
 }
 
 // ============================================================
-// WiFi Proxy Auto-Configuration via SCPreferences API
-// Uses dlopen/dlsym to bypass iOS SDK restrictions.
-// Requires entitlements: SCPreferences-write-access, platform-application.
-// Tailscale uses utun interface → NOT affected by WiFi proxy.
+// VPN Tunnel Management via NETunnelProviderManager
+// Replaces WiFi proxy with local VPN tunnel.
+// sing-box runs as mixed inbound on 127.0.0.1:19080.
+// PacketTunnel.appex sets NEProxySettings → sing-box.
+// Tailscale excluded via route rules in extension.
 // ============================================================
 
-// Function pointer typedefs for SystemConfiguration APIs
-typedef void *SCDynStoreRef_t;
-typedef SCDynStoreRef_t (*fn_SCDynamicStoreCreate)(CFAllocatorRef, CFStringRef, void *, void *);
-typedef CFPropertyListRef (*fn_SCDynamicStoreCopyValue)(SCDynStoreRef_t, CFStringRef);
-typedef Boolean (*fn_SCDynamicStoreSetValue)(SCDynStoreRef_t, CFStringRef, CFPropertyListRef);
+static NSString *const kExtensionBundleID = @"com.82flex.trollvnc.PacketTunnel";
 
-typedef void *SCPrefsRef_t;
-typedef SCPrefsRef_t (*fn_SCPreferencesCreate)(CFAllocatorRef, CFStringRef, CFStringRef);
-typedef Boolean (*fn_SCPreferencesLock)(SCPrefsRef_t, Boolean);
-typedef Boolean (*fn_SCPreferencesUnlock)(SCPrefsRef_t);
-typedef Boolean (*fn_SCPreferencesCommitChanges)(SCPrefsRef_t);
-typedef Boolean (*fn_SCPreferencesApplyChanges)(SCPrefsRef_t);
-typedef Boolean (*fn_SCPreferencesPathSetValue)(SCPrefsRef_t, CFStringRef, CFDictionaryRef);
-typedef CFDictionaryRef (*fn_SCPreferencesPathGetValue)(SCPrefsRef_t, CFStringRef);
+- (void)installVPNProfileWithCompletion:(void(^)(NETunnelProviderManager *manager, NSError *error))completion {
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *loadErr) {
+        NETunnelProviderManager *manager = managers.firstObject ?: [NETunnelProviderManager new];
 
-// Static function pointers
-static fn_SCDynamicStoreCreate       _scCreate = NULL;
-static fn_SCDynamicStoreCopyValue    _scCopyValue = NULL;
-static fn_SCDynamicStoreSetValue     _scSetValue = NULL;
-static fn_SCPreferencesCreate        _scpCreate = NULL;
-static fn_SCPreferencesLock          _scpLock = NULL;
-static fn_SCPreferencesUnlock        _scpUnlock = NULL;
-static fn_SCPreferencesCommitChanges _scpCommit = NULL;
-static fn_SCPreferencesApplyChanges  _scpApply = NULL;
-static fn_SCPreferencesPathSetValue  _scpPathSet = NULL;
-static fn_SCPreferencesPathGetValue  _scpPathGet = NULL;
-static BOOL _scLoaded = NO;
+        NETunnelProviderProtocol *proto = [NETunnelProviderProtocol new];
+        proto.providerBundleIdentifier = kExtensionBundleID;
+        proto.serverAddress = @"Phone Agent VPN";
+        proto.providerConfiguration = @{};
 
-- (BOOL)loadSystemConfiguration {
-    if (_scLoaded) return (_scpCreate != NULL);
+        manager.protocolConfiguration = proto;
+        manager.localizedDescription = @"Phone Agent";
+        manager.enabled = YES;
 
-    void *h = dlopen("/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration", RTLD_LAZY);
-    if (!h) { _scLoaded = YES; return NO; }
-
-    _scCreate    = (fn_SCDynamicStoreCreate)dlsym(h, "SCDynamicStoreCreate");
-    _scCopyValue = (fn_SCDynamicStoreCopyValue)dlsym(h, "SCDynamicStoreCopyValue");
-    _scSetValue  = (fn_SCDynamicStoreSetValue)dlsym(h, "SCDynamicStoreSetValue");
-    _scpCreate   = (fn_SCPreferencesCreate)dlsym(h, "SCPreferencesCreate");
-    _scpLock     = (fn_SCPreferencesLock)dlsym(h, "SCPreferencesLock");
-    _scpUnlock   = (fn_SCPreferencesUnlock)dlsym(h, "SCPreferencesUnlock");
-    _scpCommit   = (fn_SCPreferencesCommitChanges)dlsym(h, "SCPreferencesCommitChanges");
-    _scpApply    = (fn_SCPreferencesApplyChanges)dlsym(h, "SCPreferencesApplyChanges");
-    _scpPathSet  = (fn_SCPreferencesPathSetValue)dlsym(h, "SCPreferencesPathSetValue");
-    _scpPathGet  = (fn_SCPreferencesPathGetValue)dlsym(h, "SCPreferencesPathGetValue");
-
-    _scLoaded = YES;
-    NSLog(@"[PhoneClawAPI] SC loaded: prefs=%p commit=%p apply=%p dynStore=%p dynSet=%p",
-          _scpCreate, _scpCommit, _scpApply, _scCreate, _scSetValue);
-    return (_scpCreate != NULL && _scpCommit != NULL && _scpApply != NULL);
-}
-
-// Get the active WiFi network service ID from SCDynamicStore
-- (NSString *)copyActiveWiFiServiceID {
-    if (!_scCreate || !_scCopyValue) return nil;
-
-    SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-    if (!store) return nil;
-
-    // Read primary network service
-    NSDictionary *ipv4 = (__bridge NSDictionary *)_scCopyValue(store, CFSTR("State:/Network/Global/IPv4"));
-    CFRelease(store);
-
-    NSString *serviceID = ipv4[@"PrimaryService"];
-    if (serviceID.length > 0) {
-        NSLog(@"[PhoneClawAPI] Active WiFi service ID: %@", serviceID);
-    }
-    return serviceID;
-}
-
-// Find PID of a process by name using sysctl (works on iOS without killall/pgrep)
-#include <sys/sysctl.h>
-- (pid_t)findProcessByName:(const char *)name {
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t size = 0;
-    if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) return 0;
-
-    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
-    if (!procs) return 0;
-    if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) { free(procs); return 0; }
-
-    int count = (int)(size / sizeof(struct kinfo_proc));
-    pid_t found = 0;
-    for (int i = 0; i < count; i++) {
-        if (strcmp(procs[i].kp_proc.p_comm, name) == 0) {
-            found = procs[i].kp_proc.p_pid;
-            break;
-        }
-    }
-    free(procs);
-    return found;
-}
-
-// Kill and restart wifid to force iOS reload WiFi config from plist
-- (BOOL)restartWifid {
-    NSLog(@"[PhoneClawAPI] Restarting wifid to apply WiFi proxy...");
-
-    pid_t wifidPid = [self findProcessByName:"wifid"];
-    if (wifidPid > 0) {
-        kill(wifidPid, SIGTERM);
-        NSLog(@"[PhoneClawAPI] Killed wifid PID %d, launchd will restart it", wifidPid);
-        // Wait for wifid to restart and WiFi to reconnect
-        usleep(2000000); // 2 seconds
-        return YES;
-    }
-    NSLog(@"[PhoneClawAPI] wifid process not found");
-    return NO;
-}
-
-// Clear proxy from WiFi plist (used by disableSystemProxy fallback)
-- (void)clearWifiPlistProxy {
-    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
-    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
-    if (!wifiPrefs) return;
-    id knownNetworks = wifiPrefs[@"List of known networks"];
-    if (![knownNetworks isKindOfClass:[NSArray class]]) return;
-
-    NSMutableArray *networks = [NSMutableArray arrayWithArray:knownNetworks];
-    for (NSUInteger i = 0; i < networks.count; i++) {
-        NSMutableDictionary *net = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
-        [net removeObjectForKey:@"ProxyType"];
-        [net removeObjectForKey:@"ProxyServer"];
-        [net removeObjectForKey:@"ProxyPort"];
-        [net removeObjectForKey:@"ProxyServerHTTPS"];
-        [net removeObjectForKey:@"ProxyPortHTTPS"];
-        networks[i] = net;
-    }
-    wifiPrefs[@"List of known networks"] = networks;
-    [wifiPrefs writeToFile:wifiPlistPath atomically:YES];
-    NSLog(@"[PhoneClawAPI] WiFi plist proxy cleared");
-}
-
-// ============================================================
-// enableSystemProxy — Set WiFi proxy to 127.0.0.1:19080
-// 3-layer approach: SCPreferences → SCDynamicStore → WiFi plist
-// Verify via SCDynamicStore readback → fallback kill wifid
-// ============================================================
-- (void)enableSystemProxy {
-    NSLog(@"[PhoneClawAPI] enableSystemProxy: starting 3-layer proxy setup...");
-
-    // === Layer A: SCPreferences (graceful, preferred) ===
-    BOOL scpOk = NO;
-    if ([self loadSystemConfiguration] && _scpPathSet && _scpPathGet) {
-        NSString *serviceID = [self copyActiveWiFiServiceID];
-        if (serviceID) {
-            SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
-            if (prefs) {
-                if (_scpLock(prefs, TRUE)) {
-                    NSDictionary *proxyDict = @{
-                        @"HTTPEnable": @1,
-                        @"HTTPProxy": @"127.0.0.1",
-                        @"HTTPPort": @(kLocalProxyPort),
-                        @"HTTPSEnable": @1,
-                        @"HTTPSProxy": @"127.0.0.1",
-                        @"HTTPSPort": @(kLocalProxyPort),
-                        @"ExceptionsList": @[@"*.local", @"169.254/16", @"127.0.0.1",
-                                             @"100.64.0.0/10", @"10.0.0.0/8"],
-                    };
-
-                    NSString *path = [NSString stringWithFormat:
-                        @"/NetworkServices/%@/Proxies", serviceID];
-
-                    Boolean setOk = _scpPathSet(prefs,
-                        (__bridge CFStringRef)path,
-                        (__bridge CFDictionaryRef)proxyDict);
-                    Boolean commitOk = _scpCommit(prefs);
-                    Boolean applyOk = _scpApply(prefs);
-                    _scpUnlock(prefs);
-
-                    scpOk = (setOk && commitOk && applyOk);
-                    NSLog(@"[PhoneClawAPI] SCPreferences: set=%d commit=%d apply=%d -> %@",
-                          setOk, commitOk, applyOk, scpOk ? @"OK" : @"FAIL");
-                } else {
-                    NSLog(@"[PhoneClawAPI] SCPreferences lock failed");
-                }
-                CFRelease(prefs);
+        [manager saveToPreferencesWithCompletionHandler:^(NSError *saveErr) {
+            if (saveErr) {
+                NSLog(@"[PhoneClawAPI] VPN profile save failed: %@", saveErr);
+                completion(nil, saveErr);
+                return;
             }
+            // Must reload after save (Apple requirement)
+            [manager loadFromPreferencesWithCompletionHandler:^(NSError *reloadErr) {
+                if (reloadErr) {
+                    NSLog(@"[PhoneClawAPI] VPN profile reload failed: %@", reloadErr);
+                }
+                completion(manager, reloadErr);
+            }];
+        }];
+    }];
+}
+
+- (void)startVPNTunnelWithCompletion:(void(^)(BOOL success, NSString *error))completion {
+    [self installVPNProfileWithCompletion:^(NETunnelProviderManager *manager, NSError *error) {
+        if (!manager) {
+            completion(NO, error.localizedDescription ?: @"VPN profile install failed");
+            return;
+        }
+
+        NSError *startErr = nil;
+        [(NETunnelProviderSession *)manager.connection startVPNTunnelWithOptions:@{} andReturnError:&startErr];
+
+        if (startErr) {
+            NSLog(@"[PhoneClawAPI] VPN tunnel start failed: %@", startErr);
+            completion(NO, startErr.localizedDescription);
         } else {
-            NSLog(@"[PhoneClawAPI] No active WiFi service ID found");
+            NSLog(@"[PhoneClawAPI] VPN tunnel started successfully");
+            completion(YES, nil);
         }
-    }
-
-    // === Layer B: SCDynamicStore (runtime state, immediate effect) ===
-    if (_scCreate && _scSetValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-        if (store) {
-            NSDictionary *globalProxy = @{
-                @"HTTPEnable": @1,
-                @"HTTPProxy": @"127.0.0.1",
-                @"HTTPPort": @(kLocalProxyPort),
-                @"HTTPSEnable": @1,
-                @"HTTPSProxy": @"127.0.0.1",
-                @"HTTPSPort": @(kLocalProxyPort),
-            };
-            _scSetValue(store,
-                CFSTR("State:/Network/Global/Proxies"),
-                (__bridge CFPropertyListRef)globalProxy);
-            NSLog(@"[PhoneClawAPI] SCDynamicStore: Global/Proxies set");
-            CFRelease(store);
-        }
-    }
-
-    // === Layer C: WiFi plist (persistence for known networks) ===
-    NSString *wifiPlistPath = @"/var/preferences/SystemConfiguration/com.apple.wifi.plist";
-    NSMutableDictionary *wifiPrefs = [NSMutableDictionary dictionaryWithContentsOfFile:wifiPlistPath];
-    if (wifiPrefs) {
-        id knownNetworks = wifiPrefs[@"List of known networks"];
-        if ([knownNetworks isKindOfClass:[NSArray class]]) {
-            NSMutableArray *networks = [NSMutableArray arrayWithArray:knownNetworks];
-            for (NSUInteger i = 0; i < networks.count; i++) {
-                NSMutableDictionary *net = [NSMutableDictionary dictionaryWithDictionary:networks[i]];
-                net[@"ProxyType"] = @"manual";
-                net[@"ProxyServer"] = @"127.0.0.1";
-                net[@"ProxyPort"] = @(kLocalProxyPort);
-                net[@"ProxyServerHTTPS"] = @"127.0.0.1";
-                net[@"ProxyPortHTTPS"] = @(kLocalProxyPort);
-                networks[i] = net;
-            }
-            wifiPrefs[@"List of known networks"] = networks;
-            [wifiPrefs writeToFile:wifiPlistPath atomically:YES];
-            NSLog(@"[PhoneClawAPI] WiFi plist proxy set for %lu networks",
-                  (unsigned long)networks.count);
-        }
-    }
-
-    // === Verify: Read back proxy from SCDynamicStore ===
-    BOOL verified = NO;
-    if (_scCreate && _scCopyValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgentVerify"), NULL, NULL);
-        if (store) {
-            NSDictionary *current = (__bridge NSDictionary *)
-                _scCopyValue(store, CFSTR("State:/Network/Global/Proxies"));
-            if (current && [current[@"HTTPEnable"] intValue] == 1) {
-                verified = YES;
-                NSLog(@"[PhoneClawAPI] Proxy verified: HTTPEnable=1, proxy=%@:%@",
-                      current[@"HTTPProxy"], current[@"HTTPPort"]);
-            } else {
-                NSLog(@"[PhoneClawAPI] Proxy NOT verified: %@", current);
-            }
-            CFRelease(store);
-        }
-    }
-
-    // NOTE: Do NOT kill wifid here! Killing wifid drops WiFi → Tailscale drops
-    // → Dashboard loses connection → phone stuck offline.
-    // Trust that SCPreferences/SCDynamicStore/WiFi plist will take effect.
-    // Proxy will apply on next WiFi reconnect at worst.
-    if (!verified) {
-        NSLog(@"[PhoneClawAPI] Proxy not verified via readback, but layers A+B+C are set. "
-              "Proxy should take effect without wifid restart.");
-    }
-
-    NSLog(@"[PhoneClawAPI] enableSystemProxy complete: scPrefs=%@ verified=%@",
-          scpOk ? @"Y" : @"N", verified ? @"Y" : @"N");
+    }];
 }
 
-// ============================================================
-// disableSystemProxy — Remove WiFi proxy, restore direct connection
-// 3-layer clear: SCPreferences → SCDynamicStore → WiFi plist
-// Verify via SCDynamicStore readback → fallback kill wifid
-// ============================================================
-- (void)disableSystemProxy {
-    NSLog(@"[PhoneClawAPI] disableSystemProxy: removing proxy...");
-
-    // === Layer A: SCPreferences — clear proxy for active WiFi service ===
-    BOOL scpOk = NO;
-    if ([self loadSystemConfiguration] && _scpPathSet) {
-        NSString *serviceID = [self copyActiveWiFiServiceID];
-        if (serviceID) {
-            SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
-            if (prefs) {
-                if (_scpLock(prefs, TRUE)) {
-                    NSDictionary *emptyProxy = @{
-                        @"HTTPEnable": @0,
-                        @"HTTPSEnable": @0,
-                    };
-                    NSString *path = [NSString stringWithFormat:
-                        @"/NetworkServices/%@/Proxies", serviceID];
-                    Boolean setOk = _scpPathSet(prefs,
-                        (__bridge CFStringRef)path,
-                        (__bridge CFDictionaryRef)emptyProxy);
-                    Boolean commitOk = _scpCommit(prefs);
-                    Boolean applyOk = _scpApply(prefs);
-                    _scpUnlock(prefs);
-                    scpOk = (setOk && commitOk && applyOk);
-                    NSLog(@"[PhoneClawAPI] SCPreferences clear: set=%d commit=%d apply=%d",
-                          setOk, commitOk, applyOk);
-                }
-                CFRelease(prefs);
-            }
+- (void)stopVPNTunnel {
+    [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager *> *managers, NSError *err) {
+        NETunnelProviderManager *manager = managers.firstObject;
+        if (manager) {
+            [manager.connection stopVPNTunnel];
+            NSLog(@"[PhoneClawAPI] VPN tunnel stopped");
         }
-    }
-
-    // === Layer B: SCDynamicStore — clear runtime proxy state ===
-    if (_scCreate && _scSetValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-        if (store) {
-            NSDictionary *emptyProxy = @{
-                @"HTTPEnable": @0,
-                @"HTTPSEnable": @0,
-            };
-            _scSetValue(store,
-                CFSTR("State:/Network/Global/Proxies"),
-                (__bridge CFPropertyListRef)emptyProxy);
-            NSLog(@"[PhoneClawAPI] SCDynamicStore: Global/Proxies cleared");
-            CFRelease(store);
-        }
-    }
-
-    // === Layer C: WiFi plist — clear proxy for persistence ===
-    [self clearWifiPlistProxy];
-
-    // === Verify: Read back to confirm proxy is disabled ===
-    BOOL verified = NO;
-    if (_scCreate && _scCopyValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgentVerify"), NULL, NULL);
-        if (store) {
-            NSDictionary *current = (__bridge NSDictionary *)
-                _scCopyValue(store, CFSTR("State:/Network/Global/Proxies"));
-            if (!current || [current[@"HTTPEnable"] intValue] == 0) {
-                verified = YES;
-            }
-            CFRelease(store);
-        }
-    }
-
-    // === Fallback: Kill wifid if proxy still active ===
-    if (!verified) {
-        NSLog(@"[PhoneClawAPI] Proxy still active after disable, restarting wifid...");
-        [self restartWifid];
-    }
-
-    NSLog(@"[PhoneClawAPI] disableSystemProxy complete: scPrefs=%@ verified=%@",
-          scpOk ? @"Y" : @"N", verified ? @"Y" : @"N");
+    }];
 }
 
 - (NSData *)handleProxyStatus {
@@ -1184,11 +913,8 @@ static BOOL _scLoaded = NO;
 }
 
 - (NSData *)handleProxyStart {
-    if (_proxyRunning && [self isSingboxProcessAlive]) {
-        [[BulletinManager sharedManager] updateSingleBannerWithContent:
-            [NSString stringWithFormat:@"🛡️ Proxy đang chạy (PID %d)", _singboxPid]
-            badgeCount:0 userInfo:nil];
-        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy already running", @"pid": @(_singboxPid)});
+    if (_proxyRunning) {
+        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy already running"});
     }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -1198,109 +924,102 @@ static BOOL _scLoaded = NO;
         return jsonResponse(@{@"error": @"No proxy config. Call /api/proxy/config first"});
     }
 
-    // Write fresh config
+    // Write fresh sing-box config
     [self writeSingboxConfig];
 
     NSString *binaryPath = [self singboxBinaryPath];
     NSString *configPath = [self singboxConfigPath];
 
-    // Check binary exists
     if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) {
         NSLog(@"[PhoneClawAPI] sing-box binary not found at %@", binaryPath);
-        [[BulletinManager sharedManager] popBannerWithContent:@"❌ sing-box binary không tìm thấy" userInfo:nil];
-        return jsonResponse(@{@"error": @"sing-box binary not found in app bundle"});
+        return jsonResponse(@{@"error": @"sing-box binary not found"});
     }
 
     [[BulletinManager sharedManager] updateSingleBannerWithContent:@"⏳ Đang khởi động proxy..." badgeCount:1 userInfo:nil];
 
-    // Spawn sing-box process
+    // Step 1: Start sing-box process (local HTTP+SOCKS5 proxy on 127.0.0.1:19080)
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process
-        const char *args[] = {
-            [binaryPath UTF8String],
-            "run",
-            "-c", [configPath UTF8String],
-            NULL
-        };
+        const char *args[] = { [binaryPath UTF8String], "run", "-c", [configPath UTF8String], NULL };
         execv(args[0], (char *const *)args);
-        _exit(1); // exec failed
+        _exit(1);
     } else if (pid > 0) {
         _singboxPid = pid;
-        _proxyRunning = YES;
         _proxyStartTime = [NSDate date];
-        [defaults setBool:YES forKey:kProxyEnabled];
-        [defaults synchronize];
 
-        NSLog(@"[PhoneClawAPI] sing-box started with PID %d, verifying...", pid);
-
-        // Monitor process in background
+        // Monitor sing-box in background
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             int status;
             waitpid(pid, &status, 0);
-            NSLog(@"[PhoneClawAPI] sing-box process %d exited with status %d", pid, status);
+            NSLog(@"[PhoneClawAPI] sing-box PID %d exited (status %d)", pid, status);
             if (self->_singboxPid == pid) {
                 self->_proxyRunning = NO;
                 self->_singboxPid = 0;
                 self->_proxyStartTime = nil;
-                // Notify user that proxy died unexpectedly
                 [[BulletinManager sharedManager] popBannerWithContent:
-                    [NSString stringWithFormat:@"❌ Proxy đã dừng đột ngột (exit code %d)", WEXITSTATUS(status)]
+                    [NSString stringWithFormat:@"❌ Proxy dừng đột ngột (exit %d)", WEXITSTATUS(status)]
                     userInfo:nil];
             }
         });
 
-        // Wait briefly to verify sing-box didn't crash immediately
-        usleep(1500000); // 1.5 seconds
+        // Wait for sing-box to start
+        usleep(1500000); // 1.5s
 
         if (![self isSingboxProcessAlive]) {
-            _proxyRunning = NO;
             _singboxPid = 0;
             _proxyStartTime = nil;
-            [defaults setBool:NO forKey:kProxyEnabled];
-            [defaults synchronize];
-            NSLog(@"[PhoneClawAPI] sing-box crashed immediately after start");
-            [[BulletinManager sharedManager] popBannerWithContent:
-                @"❌ Proxy không thể khởi động (sing-box crashed)" userInfo:nil];
-            return jsonResponse(@{@"ok": @NO, @"error": @"sing-box crashed immediately after start — check config or permissions"});
+            return jsonResponse(@{@"ok": @NO, @"error": @"sing-box crashed immediately"});
         }
 
-        // Enable system proxy to route traffic through local sing-box
-        [self enableSystemProxy];
+        NSLog(@"[PhoneClawAPI] sing-box started (PID %d), starting VPN tunnel...", pid);
 
-        NSString *proxyInfo = [NSString stringWithFormat:@"🛡️ Proxy đã bật — %@:%ld (PID %d)",
-            ip, (long)[defaults integerForKey:kProxyPort], pid];
-        [[BulletinManager sharedManager] popBannerWithContent:proxyInfo userInfo:nil];
+        // Step 2: Start VPN tunnel (routes HTTP/HTTPS through sing-box)
+        __block NSData *response = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
-        return jsonResponse(@{@"ok": @YES, @"pid": @(pid), @"message": @"Proxy started and system proxy enabled"});
+        [self startVPNTunnelWithCompletion:^(BOOL success, NSString *error) {
+            if (success) {
+                self->_proxyRunning = YES;
+                [defaults setBool:YES forKey:kProxyEnabled];
+                [defaults synchronize];
+
+                NSString *msg = [NSString stringWithFormat:@"🛡️ VPN Proxy — %@:%ld",
+                    ip, (long)[defaults integerForKey:kProxyPort]];
+                [[BulletinManager sharedManager] popBannerWithContent:msg userInfo:nil];
+
+                response = jsonResponse(@{@"ok": @YES, @"pid": @(pid),
+                    @"message": @"VPN tunnel + sing-box started"});
+            } else {
+                NSLog(@"[PhoneClawAPI] VPN tunnel failed: %@", error);
+                [[BulletinManager sharedManager] popBannerWithContent:
+                    [NSString stringWithFormat:@"❌ VPN failed: %@", error ?: @"unknown"] userInfo:nil];
+                response = jsonResponse(@{@"ok": @NO, @"error": error ?: @"VPN tunnel failed"});
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        return response ?: jsonResponse(@{@"ok": @NO, @"error": @"VPN start timeout"});
     } else {
-        NSLog(@"[PhoneClawAPI] Failed to fork sing-box process");
-        [[BulletinManager sharedManager] popBannerWithContent:@"❌ Không thể khởi động proxy (fork failed)" userInfo:nil];
-        return jsonResponse(@{@"error": @"Failed to start sing-box (fork failed)"});
+        return jsonResponse(@{@"error": @"fork failed"});
     }
 }
 
 - (NSData *)handleProxyStop {
-    if (!_proxyRunning || _singboxPid <= 0) {
-        _proxyRunning = NO;
-        _singboxPid = 0;
-        _proxyStartTime = nil;
-        [[BulletinManager sharedManager] updateSingleBannerWithContent:@"🛑 Proxy đã tắt" badgeCount:0 userInfo:nil];
-        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy not running"});
+    // Step 1: Stop VPN tunnel
+    [self stopVPNTunnel];
+
+    // Step 2: Kill sing-box process
+    if (_singboxPid > 0) {
+        kill(_singboxPid, SIGTERM);
+        NSLog(@"[PhoneClawAPI] Sent SIGTERM to sing-box PID %d", _singboxPid);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            if (self->_singboxPid > 0 && kill(self->_singboxPid, 0) == 0) {
+                kill(self->_singboxPid, SIGKILL);
+            }
+        });
     }
-
-    // Send SIGTERM first, then SIGKILL if needed
-    kill(_singboxPid, SIGTERM);
-    NSLog(@"[PhoneClawAPI] Sent SIGTERM to sing-box PID %d", _singboxPid);
-
-    // Wait briefly for graceful shutdown
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        if (self->_singboxPid > 0 && kill(self->_singboxPid, 0) == 0) {
-            kill(self->_singboxPid, SIGKILL);
-            NSLog(@"[PhoneClawAPI] Sent SIGKILL to sing-box PID %d", self->_singboxPid);
-        }
-    });
 
     pid_t stoppedPid = _singboxPid;
     _proxyRunning = NO;
@@ -1311,16 +1030,13 @@ static BOOL _scLoaded = NO;
     [defaults setBool:NO forKey:kProxyEnabled];
     [defaults synchronize];
 
-    // Disable system proxy
-    [self disableSystemProxy];
-
-    // Disable ALL spoofing when proxy stops — restore natural device state
+    // Disable ALL spoofing when proxy stops
     [[DeviceSpoofer sharedSpoofer] stopAllSpoofing];
-    NSLog(@"[PhoneClawAPI] All spoofing disabled (proxy stopped)");
+    NSLog(@"[PhoneClawAPI] VPN + sing-box stopped, spoofing disabled");
 
-    [[BulletinManager sharedManager] popBannerWithContent:@"🛑 Proxy đã tắt, spoof đã reset" userInfo:nil];
+    [[BulletinManager sharedManager] popBannerWithContent:@"🛑 VPN Proxy đã tắt" userInfo:nil];
 
-    return jsonResponse(@{@"ok": @YES, @"message": @"Proxy stopped, spoofing disabled", @"pid": @(stoppedPid)});
+    return jsonResponse(@{@"ok": @YES, @"message": @"VPN + proxy stopped", @"pid": @(stoppedPid)});
 }
 
 - (NSData *)handleProxySpoof:(NSDictionary *)params {
@@ -1406,73 +1122,13 @@ static BOOL _scLoaded = NO;
 }
 
 - (void)autoStartProxy {
-    // SAFETY: Clear ALL proxy layers on app startup.
-    // Prevents: reinstall app → old proxy still points to 127.0.0.1:19080 (dead)
-    // → WiFi "connected" but HTTP/HTTPS all fail.
-    [self loadSystemConfiguration];
-
-    // Layer A: Clear SCPreferences proxy
-    if (_scpPathSet && _scpCreate) {
-        NSString *serviceID = [self copyActiveWiFiServiceID];
-        if (serviceID) {
-            SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
-            if (prefs && _scpLock(prefs, TRUE)) {
-                NSDictionary *emptyProxy = @{@"HTTPEnable": @0, @"HTTPSEnable": @0};
-                NSString *path = [NSString stringWithFormat:
-                    @"/NetworkServices/%@/Proxies", serviceID];
-                _scpPathSet(prefs, (__bridge CFStringRef)path,
-                    (__bridge CFDictionaryRef)emptyProxy);
-                _scpCommit(prefs);
-                _scpApply(prefs);
-                _scpUnlock(prefs);
-                CFRelease(prefs);
-            }
-        }
-    }
-
-    // Layer B: Clear SCDynamicStore proxy
-    if (_scCreate && _scSetValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgent"), NULL, NULL);
-        if (store) {
-            NSDictionary *emptyProxy = @{@"HTTPEnable": @0, @"HTTPSEnable": @0};
-            _scSetValue(store, CFSTR("State:/Network/Global/Proxies"),
-                (__bridge CFPropertyListRef)emptyProxy);
-            CFRelease(store);
-        }
-    }
-
-    // Layer C: Clear WiFi plist proxy
-    [self clearWifiPlistProxy];
-
-    // Verify: Read back to confirm proxy is actually cleared
-    BOOL verified = NO;
-    if (_scCreate && _scCopyValue) {
-        SCDynStoreRef_t store = _scCreate(NULL, CFSTR("PhoneAgentVerify"), NULL, NULL);
-        if (store) {
-            NSDictionary *current = (__bridge NSDictionary *)
-                _scCopyValue(store, CFSTR("State:/Network/Global/Proxies"));
-            if (!current || [current[@"HTTPEnable"] intValue] == 0) {
-                verified = YES;
-            }
-            CFRelease(store);
-        }
-    }
-
-    // Fallback: If old proxy still in wifid memory → restart wifid.
-    // Safe because: WiFi plist is already clean → wifid restarts → reads clean plist
-    // → WiFi reconnects WITHOUT proxy → Tailscale utun unaffected.
-    if (!verified) {
-        NSLog(@"[PhoneClawAPI] autoStartProxy: old proxy still active, restarting wifid...");
-        [self restartWifid];
-    }
-
-    NSLog(@"[PhoneClawAPI] autoStartProxy: proxy cleared (verified=%@)", verified ? @"Y" : @"N");
-
-    // Reset proxy enabled flag — proxy should only be started by Dashboard command.
+    // VPN tunnel mode: no WiFi proxy cleanup needed.
+    // VPN tunnel is managed by iOS — it auto-disconnects when app is uninstalled.
+    // Just reset the proxy enabled flag.
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:NO forKey:kProxyEnabled];
     [defaults synchronize];
-    NSLog(@"[PhoneClawAPI] autoStartProxy: proxy disabled on startup. Use Dashboard to enable.");
+    NSLog(@"[PhoneClawAPI] autoStartProxy: VPN mode, ready for Dashboard commands.");
 }
 
 @end
