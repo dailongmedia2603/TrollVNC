@@ -855,22 +855,20 @@ static BOOL _scLoaded = NO;
         }
     }
 
-    // Find and kill wifid — launchd restarts it automatically
-    FILE *fp = popen("pgrep wifid", "r");
-    if (!fp) return NO;
-    char buf[32];
-    pid_t wifidPid = 0;
-    if (fgets(buf, sizeof(buf), fp)) {
-        wifidPid = (pid_t)atoi(buf);
-    }
-    pclose(fp);
-
-    if (wifidPid > 0) {
-        kill(wifidPid, SIGTERM);
-        NSLog(@"[PhoneClawAPI] Killed wifid PID %d, launchd will restart it", wifidPid);
+    // Kill wifid — launchd restarts it automatically, picks up new plist
+    // Use system() with killall since pgrep may not exist on iOS
+    int ret = system("killall -TERM wifid 2>/dev/null");
+    if (ret == 0) {
+        NSLog(@"[PhoneClawAPI] wifid killed, launchd will restart it");
         return YES;
     }
-    NSLog(@"[PhoneClawAPI] wifid PID not found");
+    // Fallback: try by path
+    ret = system("killall -TERM /usr/sbin/wifid 2>/dev/null");
+    if (ret == 0) {
+        NSLog(@"[PhoneClawAPI] wifid killed (by path)");
+        return YES;
+    }
+    NSLog(@"[PhoneClawAPI] Could not kill wifid (ret=%d)", ret);
     return NO;
 }
 
@@ -940,31 +938,31 @@ static BOOL _scLoaded = NO;
         return;
     }
 
-    // Lock → set → commit → apply → unlock
-    if (!_scpLock(prefs, TRUE)) {
-        NSLog(@"[PhoneClawAPI] SCPreferencesLock failed, trying fallback");
-        CFRelease(prefs);
-        [self restartWifid];
-        return;
+    // Try lock (non-blocking first, then blocking)
+    BOOL locked = _scpLock(prefs, FALSE); // non-blocking
+    if (!locked) {
+        NSLog(@"[PhoneClawAPI] SCPreferencesLock non-blocking failed, trying blocking...");
+        locked = _scpLock(prefs, TRUE); // blocking with timeout
     }
 
     NSString *path = [NSString stringWithFormat:@"/NetworkServices/%@/Proxies", serviceID];
     BOOL setOk = _scpPathSet(prefs, (__bridge CFStringRef)path, (__bridge CFDictionaryRef)proxyDict);
-    NSLog(@"[PhoneClawAPI] SCPreferencesPathSetValue(%@): %@", path, setOk ? @"OK" : @"FAIL");
+    NSLog(@"[PhoneClawAPI] SCPreferencesPathSetValue(%@): %@ (locked=%d)", path, setOk ? @"OK" : @"FAIL", locked);
 
     BOOL commitOk = _scpCommit(prefs);
     NSLog(@"[PhoneClawAPI] SCPreferencesCommitChanges: %@", commitOk ? @"OK" : @"FAIL");
 
-    BOOL applyOk = _scpApply(prefs);
+    BOOL applyOk = commitOk ? _scpApply(prefs) : NO;
     NSLog(@"[PhoneClawAPI] SCPreferencesApplyChanges: %@", applyOk ? @"OK" : @"FAIL");
 
-    _scpUnlock(prefs);
+    if (locked) _scpUnlock(prefs);
     CFRelease(prefs);
 
     if (setOk && commitOk && applyOk) {
         NSLog(@"[PhoneClawAPI] WiFi proxy set via SCPreferences: 127.0.0.1:%d", kLocalProxyPort);
     } else {
-        NSLog(@"[PhoneClawAPI] SCPreferences partially failed, trying wifid fallback");
+        // SCPreferences failed — use wifid restart fallback
+        NSLog(@"[PhoneClawAPI] SCPreferences failed (set=%d commit=%d apply=%d), using wifid fallback", setOk, commitOk, applyOk);
         [self restartWifid];
     }
 }
@@ -986,20 +984,20 @@ static BOOL _scLoaded = NO;
     if (serviceID) {
         SCPrefsRef_t prefs = _scpCreate(NULL, CFSTR("PhoneAgent"), NULL);
         if (prefs) {
-            if (_scpLock(prefs, TRUE)) {
-                NSString *path = [NSString stringWithFormat:@"/NetworkServices/%@/Proxies", serviceID];
-                // Set empty proxy (disable)
-                NSDictionary *emptyProxy = @{
-                    @"HTTPEnable": @0,
-                    @"HTTPSEnable": @0,
-                };
-                _scpPathSet(prefs, (__bridge CFStringRef)path, (__bridge CFDictionaryRef)emptyProxy);
-                BOOL commitOk = _scpCommit(prefs);
-                BOOL applyOk = _scpApply(prefs);
-                _scpUnlock(prefs);
-                scpSuccess = (commitOk && applyOk);
-                NSLog(@"[PhoneClawAPI] SCPreferences proxy disabled: commit=%d apply=%d", commitOk, applyOk);
-            }
+            BOOL locked = _scpLock(prefs, FALSE);
+            if (!locked) locked = _scpLock(prefs, TRUE);
+
+            NSString *path = [NSString stringWithFormat:@"/NetworkServices/%@/Proxies", serviceID];
+            NSDictionary *emptyProxy = @{
+                @"HTTPEnable": @0,
+                @"HTTPSEnable": @0,
+            };
+            _scpPathSet(prefs, (__bridge CFStringRef)path, (__bridge CFDictionaryRef)emptyProxy);
+            BOOL commitOk = _scpCommit(prefs);
+            BOOL applyOk = commitOk ? _scpApply(prefs) : NO;
+            if (locked) _scpUnlock(prefs);
+            scpSuccess = (commitOk && applyOk);
+            NSLog(@"[PhoneClawAPI] SCPreferences proxy disabled: commit=%d apply=%d", commitOk, applyOk);
             CFRelease(prefs);
         }
     }
