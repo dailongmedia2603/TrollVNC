@@ -1257,66 +1257,20 @@ static BOOL _scLoaded = NO;
 }
 
 - (void)autoStartProxy {
+    // SAFETY: Always clear WiFi proxy plist on app startup.
+    // This prevents the crash-loop where old WiFi proxy blocks all traffic
+    // after app reinstall/restart.
+    [self clearWifiPlistProxy];
+    NSLog(@"[PhoneClawAPI] autoStartProxy: WiFi proxy plist cleared (safety reset)");
+
+    // Reset proxy enabled flag — proxy should only be started by Dashboard command.
+    // autoStartProxy previously caused issues: auto-start → WiFi proxy set → wifid killed
+    // → WiFi lost → Tailscale lost → Dashboard can't reach phone → stuck.
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if (![defaults boolForKey:kProxyEnabled]) return;
+    [defaults setBool:NO forKey:kProxyEnabled];
+    [defaults synchronize];
 
-    NSString *ip = [defaults stringForKey:kProxyIP];
-    if (!ip || ip.length == 0) return;
-
-    NSString *mode = [defaults stringForKey:kProxyMode] ?: @"none";
-    if ([mode isEqualToString:@"none"]) return;
-
-    NSLog(@"[PhoneClawAPI] Auto-starting proxy (mode=%@) — sing-box only, NO WiFi proxy change", mode);
-
-    // Only start sing-box process, do NOT call enableSystemProxy.
-    // WiFi proxy will be set by Dashboard via handleProxyStart when user explicitly triggers it.
-    // This prevents crash-loop: autoStart → enableSystemProxy → kill wifid → WiFi drops → app restarts → loop.
-    [self writeSingboxConfig];
-
-    NSString *binaryPath = [self singboxBinaryPath];
-    NSString *configPath = [self singboxConfigPath];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:binaryPath]) return;
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        const char *args[] = { [binaryPath UTF8String], "run", "-c", [configPath UTF8String], NULL };
-        execv(args[0], (char *const *)args);
-        _exit(1);
-    } else if (pid > 0) {
-        _singboxPid = pid;
-        _proxyRunning = YES;
-        _proxyStartTime = [NSDate date];
-
-        // Monitor in background
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            int status;
-            waitpid(pid, &status, 0);
-            if (self->_singboxPid == pid) {
-                self->_proxyRunning = NO;
-                self->_singboxPid = 0;
-                self->_proxyStartTime = nil;
-            }
-        });
-
-        NSLog(@"[PhoneClawAPI] sing-box auto-started with PID %d", pid);
-    }
-
-    // Re-apply spoof settings (these don't affect WiFi/Tailscale)
-    NSMutableDictionary *spoofParams = [NSMutableDictionary dictionary];
-    spoofParams[@"mode"] = mode;
-    if ([mode isEqualToString:@"us"]) {
-        NSString *tz = [defaults stringForKey:kSpoofTimezone];
-        NSString *locale = [defaults stringForKey:kSpoofLocale];
-        double lat = [defaults doubleForKey:kSpoofLat];
-        double lon = [defaults doubleForKey:kSpoofLon];
-        if (tz) spoofParams[@"timezone"] = tz;
-        if (locale) spoofParams[@"locale"] = locale;
-        if (lat != 0 || lon != 0) {
-            spoofParams[@"latitude"] = @(lat);
-            spoofParams[@"longitude"] = @(lon);
-        }
-    }
-    [self handleProxySpoof:spoofParams];
+    NSLog(@"[PhoneClawAPI] autoStartProxy: proxy disabled on startup. Use Dashboard to enable.");
 }
 
 @end
