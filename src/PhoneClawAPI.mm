@@ -1200,81 +1200,76 @@ static BOOL _scLoaded = NO;
             dispatch_semaphore_wait(sem1, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
         }
 
-        NSLog(@"[PhoneClawAPI] clear-photos: step 1 done, waiting for trash sync...");
-        usleep(5000000); // 5s cho Photos DB cập nhật thùng rác
+        NSLog(@"[PhoneClawAPI] clear-photos: step 1 done, purging trash via filesystem...");
+        usleep(2000000); // 2s cho step 1 hoàn tất
 
-        // === Bước 2: Dọn sạch "Đã xoá gần đây" → xoá vĩnh viễn ===
-        // Fetch ALL assets lại (bao gồm trashed) — vì iOS có thể chưa sync album
-        // Thử nhiều cách tìm trashed assets
-        PHFetchOptions *trashOpts = [[PHFetchOptions alloc] init];
-        // includeAssetSourceTypes bao gồm tất cả
-        trashOpts.includeAssetSourceTypes = PHAssetSourceTypeUserLibrary | PHAssetSourceTypeCloudShared | PHAssetSourceTypeiTunesSynced;
+        // === Bước 2: Xoá thùng rác bằng filesystem + kill assetsd ===
+        // deleteAssets trên trashed items KHÔNG hoạt động (silently no-op).
+        // Approach: xoá file DCIM + xoá Photos.sqlite + restart assetsd.
+        NSFileManager *fm = [NSFileManager defaultManager];
 
-        // Cách 1: subtype 1000000201 (Recently Deleted)
-        PHFetchResult<PHAssetCollection *> *trashAlbums =
-            [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
-                                                    subtype:(PHAssetCollectionSubtype)1000000201
-                                                    options:nil];
-        PHAssetCollection *recentlyDeleted = trashAlbums.firstObject;
-
-        // Cách 2: nếu cách 1 fail, duyệt tất cả smart albums tìm "Recently Deleted"
-        if (!recentlyDeleted) {
-            PHFetchResult<PHAssetCollection *> *allSmartAlbums =
-                [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
-                                                        subtype:PHAssetCollectionSubtypeAny
-                                                        options:nil];
-            for (PHAssetCollection *album in allSmartAlbums) {
-                NSString *title = album.localizedTitle ?: @"";
-                if ([title containsString:@"Recently Deleted"] || [title containsString:@"Đã xoá"]) {
-                    recentlyDeleted = album;
-                    NSLog(@"[PhoneClawAPI] clear-photos: found trash album: %@ (subtype=%ld)",
-                          title, (long)album.assetCollectionSubtype);
-                    break;
-                }
-            }
+        // 2a. Freeze assetsd để release DB lock
+        pid_t assetsdPid = [self findProcessByName:"assetsd"];
+        if (assetsdPid > 0) {
+            kill(assetsdPid, SIGSTOP);
+            NSLog(@"[PhoneClawAPI] clear-photos: froze assetsd PID %d", assetsdPid);
+            usleep(500000);
         }
 
-        NSUInteger trashedCount = 0;
-
-        if (recentlyDeleted) {
-            PHFetchResult<PHAsset *> *trashedAssets =
-                [PHAsset fetchAssetsInAssetCollection:recentlyDeleted options:nil];
-            trashedCount = trashedAssets.count;
-
-            if (trashedCount > 0) {
-                NSLog(@"[PhoneClawAPI] clear-photos step 2: purging %lu trashed assets...",
-                      (unsigned long)trashedCount);
-
-                dispatch_semaphore_t sem2 = dispatch_semaphore_create(0);
-                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-                    [PHAssetChangeRequest deleteAssets:trashedAssets];
-                } completionHandler:^(BOOL success, NSError *error) {
-                    if (success) {
-                        NSLog(@"[PhoneClawAPI] clear-photos step 2: %lu trashed assets purged",
-                              (unsigned long)trashedCount);
-                    } else {
-                        NSLog(@"[PhoneClawAPI] clear-photos step 2 error: %@", error);
-                    }
-                    dispatch_semaphore_signal(sem2);
-                }];
-
-                // Đợi popup hiện → auto-tap "Delete" (tọa độ thùng rác riêng)
-                usleep(2000000);
-                [self autoTapDeleteAtX:trashDelX y:trashDelY];
-
-                dispatch_semaphore_wait(sem2, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
-            } else {
-                NSLog(@"[PhoneClawAPI] clear-photos step 2: Recently Deleted is empty");
+        // 2b. Xoá tất cả file trong DCIM
+        NSString *dcimPath = @"/var/mobile/Media/DCIM";
+        NSArray *dcimContents = [fm contentsOfDirectoryAtPath:dcimPath error:nil];
+        NSUInteger filesDeleted = 0;
+        for (NSString *folder in dcimContents) {
+            NSString *fullPath = [dcimPath stringByAppendingPathComponent:folder];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
+                NSError *err = nil;
+                [fm removeItemAtPath:fullPath error:&err];
+                if (!err) filesDeleted++;
             }
-        } else {
-            NSLog(@"[PhoneClawAPI] clear-photos step 2: Recently Deleted album not found");
+        }
+        // Tạo lại thư mục DCIM cơ bản
+        [fm createDirectoryAtPath:[dcimPath stringByAppendingPathComponent:@"100APPLE"]
+            withIntermediateDirectories:YES attributes:nil error:nil];
+
+        // 2c. Xoá Photos database (assetsd sẽ tạo lại khi restart)
+        NSArray *dbFiles = @[
+            @"/var/mobile/Media/PhotoData/Photos.sqlite",
+            @"/var/mobile/Media/PhotoData/Photos.sqlite-wal",
+            @"/var/mobile/Media/PhotoData/Photos.sqlite-shm",
+        ];
+        for (NSString *dbFile in dbFiles) {
+            [fm removeItemAtPath:dbFile error:nil];
         }
 
-        NSLog(@"[PhoneClawAPI] clear-photos: DONE — %lu assets + %lu trashed purged",
-              (unsigned long)totalCount, (unsigned long)trashedCount);
+        // 2d. Xoá thumbnails + caches
+        NSArray *cachePaths = @[
+            @"/var/mobile/Media/PhotoData/Thumbnails",
+            @"/var/mobile/Media/PhotoData/Caches",
+            @"/var/mobile/Media/PhotoData/CPL",
+            @"/var/mobile/Media/PhotoData/Mutations",
+        ];
+        for (NSString *path in cachePaths) {
+            [fm removeItemAtPath:path error:nil];
+            [fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+
+        // 2e. Kill assetsd → launchd tự restart → DB rebuilt sạch
+        if (assetsdPid > 0) {
+            kill(assetsdPid, SIGKILL);
+        }
+        // Backup: tìm lại PID phòng trường hợp assetsd đã restart
+        pid_t assetsdPid2 = [self findProcessByName:"assetsd"];
+        if (assetsdPid2 > 0 && assetsdPid2 != assetsdPid) {
+            kill(assetsdPid2, SIGKILL);
+        }
+
+        NSLog(@"[PhoneClawAPI] clear-photos: DONE — %lu assets deleted + %lu DCIM folders wiped + DB reset",
+              (unsigned long)totalCount, (unsigned long)filesDeleted);
         [[BulletinManager sharedManager] popBannerWithContent:
-            [NSString stringWithFormat:@"✅ Đã xoá %lu ảnh/video + %lu thùng rác",
-                (unsigned long)totalCount, (unsigned long)trashedCount]
+            [NSString stringWithFormat:@"✅ Đã xoá %lu ảnh/video + thùng rác (sạch hoàn toàn)",
+                (unsigned long)totalCount]
             userInfo:nil];
     });
 
