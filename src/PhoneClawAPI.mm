@@ -1201,15 +1201,39 @@ static BOOL _scLoaded = NO;
         }
 
         NSLog(@"[PhoneClawAPI] clear-photos: step 1 done, waiting for trash sync...");
-        usleep(3000000); // 3s cho Photos DB cập nhật thùng rác
+        usleep(5000000); // 5s cho Photos DB cập nhật thùng rác
 
         // === Bước 2: Dọn sạch "Đã xoá gần đây" → xoá vĩnh viễn ===
-        // subtype 1000000201 = Recently Deleted (private)
+        // Fetch ALL assets lại (bao gồm trashed) — vì iOS có thể chưa sync album
+        // Thử nhiều cách tìm trashed assets
+        PHFetchOptions *trashOpts = [[PHFetchOptions alloc] init];
+        // includeAssetSourceTypes bao gồm tất cả
+        trashOpts.includeAssetSourceTypes = PHAssetSourceTypeUserLibrary | PHAssetSourceTypeCloudShared | PHAssetSourceTypeiTunesSynced;
+
+        // Cách 1: subtype 1000000201 (Recently Deleted)
         PHFetchResult<PHAssetCollection *> *trashAlbums =
             [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
                                                     subtype:(PHAssetCollectionSubtype)1000000201
                                                     options:nil];
         PHAssetCollection *recentlyDeleted = trashAlbums.firstObject;
+
+        // Cách 2: nếu cách 1 fail, duyệt tất cả smart albums tìm "Recently Deleted"
+        if (!recentlyDeleted) {
+            PHFetchResult<PHAssetCollection *> *allSmartAlbums =
+                [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum
+                                                        subtype:PHAssetCollectionSubtypeAny
+                                                        options:nil];
+            for (PHAssetCollection *album in allSmartAlbums) {
+                NSString *title = album.localizedTitle ?: @"";
+                if ([title containsString:@"Recently Deleted"] || [title containsString:@"Đã xoá"]) {
+                    recentlyDeleted = album;
+                    NSLog(@"[PhoneClawAPI] clear-photos: found trash album: %@ (subtype=%ld)",
+                          title, (long)album.assetCollectionSubtype);
+                    break;
+                }
+            }
+        }
+
         NSUInteger trashedCount = 0;
 
         if (recentlyDeleted) {
