@@ -26,6 +26,7 @@
 #import <signal.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <CoreLocation/CoreLocation.h>
+#import <ifaddrs.h>
 
 // SpringBoardServices launch API (available with com.apple.springboard.launchapplications entitlement)
 extern "C" int SBSLaunchApplicationWithIdentifier(CFStringRef identifier, Boolean suspended);
@@ -151,6 +152,9 @@ static NSString *const kSpoofLocale   = @"SpoofLocale";
 static NSString *const kSpoofLat      = @"SpoofLatitude";
 static NSString *const kSpoofLon      = @"SpoofLongitude";
 
+// --- Heartbeat UserDefaults key ---
+static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.0.1:9000/api/heartbeat"
+
 @implementation PhoneClawAPI {
     int _serverSocket;
     dispatch_source_t _acceptSource;
@@ -159,6 +163,8 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     pid_t _singboxPid;
     BOOL _proxyRunning;
     NSDate *_proxyStartTime;
+    // Heartbeat
+    dispatch_source_t _heartbeatTimer;
 }
 
 + (instancetype)sharedAPI {
@@ -230,10 +236,14 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     _running = YES;
 
     NSLog(@"[PhoneClawAPI] HTTP API server started on port %d", port);
+
+    // Start heartbeat push to VPS
+    [self startHeartbeat];
 }
 
 - (void)stop {
     if (!_running) return;
+    [self stopHeartbeat];
     if (_acceptSource) {
         dispatch_source_cancel(_acceptSource);
         _acceptSource = nil;
@@ -359,6 +369,10 @@ static NSString *const kSpoofLon      = @"SpoofLongitude";
     else if ([path isEqualToString:@"/proxy.pac"] && [method isEqualToString:@"GET"]) {
         responseBody = [self handleProxyPAC];
         contentType = @"application/x-ns-proxy-autoconfig";
+    }
+    // --- Heartbeat Config ---
+    else if ([path isEqualToString:@"/api/heartbeat/config"] && [method isEqualToString:@"POST"]) {
+        responseBody = [self handleHeartbeatConfig:parseJSON(bodyData)];
     }
     // --- Photos Management ---
     else if ([path isEqualToString:@"/api/clear-photos"] && [method isEqualToString:@"POST"]) {
@@ -1605,6 +1619,178 @@ static BOOL _scLoaded = NO;
             params[@"timezone"] ?: @"auto"] userInfo:nil];
 
     return jsonResponse(@{@"ok": @YES, @"applied": applied, @"mode": @"us"});
+}
+
+#pragma mark - Heartbeat Push to VPS
+
+/**
+ * Get the Tailscale IP address (utun interface, 100.x.x.x range).
+ * Returns nil if Tailscale is not connected.
+ */
+- (NSString *)getTailscaleIP {
+    NSString *tailscaleIP = nil;
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0) return nil;
+
+    for (struct ifaddrs *ifa = interfaces; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET) continue;
+
+        NSString *name = [NSString stringWithUTF8String:ifa->ifa_name];
+        // Tailscale uses utun interfaces
+        if (![name hasPrefix:@"utun"]) continue;
+
+        struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+        char buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf));
+        NSString *ip = [NSString stringWithUTF8String:buf];
+
+        // Tailscale CGNAT range: 100.64.0.0/10 (100.64.x.x - 100.127.x.x)
+        if ([ip hasPrefix:@"100."]) {
+            NSArray *parts = [ip componentsSeparatedByString:@"."];
+            int second = [parts[1] intValue];
+            if (second >= 64 && second <= 127) {
+                tailscaleIP = ip;
+                break;
+            }
+        }
+    }
+
+    freeifaddrs(interfaces);
+    return tailscaleIP;
+}
+
+/**
+ * Handle POST /api/heartbeat/config
+ * VPS pushes heartbeat URL to phone after device creation.
+ * Body: {"url": "http://100.64.0.1:9000/api/heartbeat"}
+ */
+- (NSData *)handleHeartbeatConfig:(NSDictionary *)params {
+    if (!params || !params[@"url"]) {
+        return jsonResponse(@{@"error": @"Missing 'url' parameter"});
+    }
+
+    NSString *url = params[@"url"];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:url forKey:kHeartbeatURL];
+    [defaults synchronize];
+
+    // Restart heartbeat with new URL
+    [self stopHeartbeat];
+    [self startHeartbeat];
+
+    NSLog(@"[Heartbeat] Config updated: %@", url);
+    return jsonResponse(@{@"ok": @YES, @"url": url});
+}
+
+/**
+ * Start heartbeat timer — sends POST to VPS every 30 seconds.
+ * Sends immediately on start, then repeats.
+ */
+- (void)startHeartbeat {
+    [self stopHeartbeat];
+
+    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:kHeartbeatURL];
+    if (!url || url.length == 0) {
+        NSLog(@"[Heartbeat] No URL configured, skipping");
+        return;
+    }
+
+    // Send first heartbeat immediately
+    [self sendHeartbeat];
+
+    // Repeat every 30 seconds using GCD timer
+    _heartbeatTimer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)
+    );
+    dispatch_source_set_timer(_heartbeatTimer,
+        dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
+        30 * NSEC_PER_SEC, 5 * NSEC_PER_SEC);
+
+    // Singleton — no retain cycle concern, safe to capture self directly
+    dispatch_source_set_event_handler(_heartbeatTimer, ^{
+        [self sendHeartbeat];
+    });
+    dispatch_resume(_heartbeatTimer);
+
+    NSLog(@"[Heartbeat] Started → %@", url);
+}
+
+- (void)stopHeartbeat {
+    if (_heartbeatTimer) {
+        dispatch_source_cancel(_heartbeatTimer);
+        _heartbeatTimer = nil;
+    }
+}
+
+/**
+ * Send one heartbeat POST to VPS.
+ * Payload: {tailscaleIp, systemVersion, model, proxyStatus, battery}
+ */
+- (void)sendHeartbeat {
+    NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:kHeartbeatURL];
+    if (!url) return;
+
+    NSString *tailscaleIP = [self getTailscaleIP];
+    if (!tailscaleIP) return; // Tailscale not connected
+
+    // Get device info — same approach as handleStatus (line 391)
+    // handleStatus also runs on background GCD queue and accesses UIDevice directly
+    __block NSString *sysVersion = @"Unknown";
+    __block NSString *model = @"iPhone";
+    __block int battery = -1;
+
+    if ([NSThread isMainThread]) {
+        UIDevice *dev = [UIDevice currentDevice];
+        [dev setBatteryMonitoringEnabled:YES];
+        sysVersion = dev.systemVersion ?: @"Unknown";
+        model = dev.model ?: @"iPhone";
+        battery = (int)(dev.batteryLevel * 100);
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            UIDevice *dev = [UIDevice currentDevice];
+            [dev setBatteryMonitoringEnabled:YES];
+            sysVersion = dev.systemVersion ?: @"Unknown";
+            model = dev.model ?: @"iPhone";
+            battery = (int)(dev.batteryLevel * 100);
+        });
+    }
+
+    // Check proxy alive
+    BOOL proxyAlive = [self isSingboxProcessAlive];
+    if (_proxyRunning && !proxyAlive) {
+        _proxyRunning = NO;
+        _singboxPid = 0;
+        _proxyStartTime = nil;
+    }
+
+    NSDictionary *payload = @{
+        @"tailscaleIp": tailscaleIP,
+        @"systemVersion": sysVersion,
+        @"model": model,
+        @"proxyStatus": _proxyRunning ? @"running" : @"stopped",
+        @"battery": @(battery),
+    };
+
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!body) return;
+
+    NSURL *endpoint = [NSURL URLWithString:url];
+    if (!endpoint) return;
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = body;
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    request.timeoutInterval = 10;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (error) {
+                NSLog(@"[Heartbeat] Failed: %@", error.localizedDescription);
+            }
+        }];
+    [task resume];
 }
 
 - (void)autoStartProxy {
