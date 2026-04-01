@@ -617,11 +617,15 @@ static void parseDaemonOptions(void) {
         if (v == 0) {
             gHttpPort = 0; // disabled
         } else if (v < 0 || v > 65535 || v < 1024) {
-            TVLog(@"-daemon: invalid HTTP Port=%d; using default 0 (disabled)", v);
-            gHttpPort = 0;
+            TVLog(@"-daemon: invalid HTTP Port=%d; using default 8080", v);
+            gHttpPort = 8080;
         } else {
             gHttpPort = v;
         }
+    } else {
+        // HttpPort not set in preferences → default to 8080
+        // This ensures API port = 8081 on fresh installs
+        gHttpPort = 8080;
     }
 
     // Booleans
