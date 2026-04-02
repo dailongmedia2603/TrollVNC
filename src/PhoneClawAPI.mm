@@ -739,6 +739,64 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
 // Local sing-box proxy port — apps connect to this, sing-box forwards to remote proxy
 static const int kLocalProxyPort = 19080;
 
+// Probe proxy server to detect protocol: SOCKS5 or HTTP.
+// Sends SOCKS5 greeting [0x05, 0x01, 0x00], if first response byte is 0x05 → SOCKS5, else HTTP.
++ (NSString *)detectProxyType:(NSString *)ip port:(int)port {
+    CFReadStreamRef readStream;
+    CFWriteStreamRef writeStream;
+    CFStreamCreatePairWithSocketToHost(NULL, (__bridge CFStringRef)ip, port, &readStream, &writeStream);
+
+    NSInputStream *inputStream = (__bridge NSInputStream *)readStream;
+    NSOutputStream *outputStream = (__bridge NSOutputStream *)writeStream;
+
+    // Set 3-second timeout via socket native handle
+    [inputStream open];
+    [outputStream open];
+
+    // Wait for connection (max 3 seconds)
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
+    while (outputStream.streamStatus != NSStreamStatusOpen && [deadline timeIntervalSinceNow] > 0) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        if (outputStream.streamStatus == NSStreamStatusError) break;
+    }
+
+    if (outputStream.streamStatus != NSStreamStatusOpen) {
+        [inputStream close];
+        [outputStream close];
+        CFRelease(readStream);
+        CFRelease(writeStream);
+        NSLog(@"[PhoneClawAPI] Proxy probe: connection failed to %@:%d, defaulting to http", ip, port);
+        return @"http";
+    }
+
+    // Send SOCKS5 greeting: version=5, 1 auth method, no-auth(0x00)
+    uint8_t socks5Greeting[] = {0x05, 0x01, 0x00};
+    [outputStream write:socks5Greeting maxLength:3];
+
+    // Wait for response (max 3 seconds)
+    deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
+    while (!inputStream.hasBytesAvailable && [deadline timeIntervalSinceNow] > 0) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        if (inputStream.streamStatus == NSStreamStatusError) break;
+    }
+
+    NSString *result = @"http"; // Default fallback
+    if (inputStream.hasBytesAvailable) {
+        uint8_t buf[2];
+        NSInteger bytesRead = [inputStream read:buf maxLength:2];
+        if (bytesRead >= 1 && buf[0] == 0x05) {
+            result = @"socks"; // SOCKS5 server responded with version 5
+        }
+    }
+
+    [inputStream close];
+    [outputStream close];
+    CFRelease(readStream);
+    CFRelease(writeStream);
+    NSLog(@"[PhoneClawAPI] Proxy probe: %@:%d → detected %@", ip, port, result);
+    return result;
+}
+
 - (void)writeSingboxConfig {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *ip   = [defaults stringForKey:kProxyIP] ?: @"";
@@ -748,10 +806,10 @@ static const int kLocalProxyPort = 19080;
 
     // Use "mixed" inbound (HTTP+SOCKS5 local proxy) instead of TUN.
     // After sing-box starts, iOS WiFi PAC routes traffic to 127.0.0.1:kLocalProxyPort.
-    // Outbound type: "http" for US proxies, "socks" for VN proxies (auto-detect by mode).
+    // Auto-detect outbound type: probe proxy to determine HTTP or SOCKS5.
     NSString *mode = [defaults stringForKey:kProxyMode] ?: @"us";
-    NSString *outboundType = [mode isEqualToString:@"vn"] ? @"socks" : @"http";
-    NSLog(@"[PhoneClawAPI] sing-box outbound type: %@ (mode=%@)", outboundType, mode);
+    NSString *outboundType = [[self class] detectProxyType:ip port:port];
+    NSLog(@"[PhoneClawAPI] sing-box outbound type: %@ (mode=%@, auto-detected)", outboundType, mode);
 
     NSDictionary *config = @{
         @"log": @{@"level": @"info", @"timestamp": @YES},
