@@ -793,10 +793,11 @@ static const int kLocalProxyPort = 19080;
 
     // Use "mixed" inbound (HTTP+SOCKS5 local proxy) instead of TUN.
     // After sing-box starts, iOS WiFi PAC routes traffic to 127.0.0.1:kLocalProxyPort.
-    // Auto-detect outbound type: probe proxy to determine HTTP or SOCKS5.
+    // Both US and VN proxies use HTTP protocol (industry standard for proxy providers).
+    // SOCKS5 auto-detect removed: adds 3s latency and most providers are HTTP.
     NSString *mode = [defaults stringForKey:kProxyMode] ?: @"us";
-    NSString *outboundType = [[self class] detectProxyType:ip port:port];
-    NSLog(@"[PhoneClawAPI] sing-box outbound type: %@ (mode=%@, auto-detected)", outboundType, mode);
+    NSString *outboundType = @"http";
+    NSLog(@"[PhoneClawAPI] sing-box outbound type: %@ (mode=%@)", outboundType, mode);
 
     NSDictionary *config = @{
         @"log": @{@"level": @"info", @"timestamp": @YES},
