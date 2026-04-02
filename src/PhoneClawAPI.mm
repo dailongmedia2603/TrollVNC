@@ -740,60 +740,47 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
 static const int kLocalProxyPort = 19080;
 
 // Probe proxy server to detect protocol: SOCKS5 or HTTP.
+// Uses POSIX sockets (works on any thread, no RunLoop needed).
 // Sends SOCKS5 greeting [0x05, 0x01, 0x00], if first response byte is 0x05 → SOCKS5, else HTTP.
 + (NSString *)detectProxyType:(NSString *)ip port:(int)port {
-    CFReadStreamRef readStream;
-    CFWriteStreamRef writeStream;
-    CFStreamCreatePairWithSocketToHost(NULL, (__bridge CFStringRef)ip, port, &readStream, &writeStream);
+    const char *host = [ip UTF8String];
 
-    NSInputStream *inputStream = (__bridge NSInputStream *)readStream;
-    NSOutputStream *outputStream = (__bridge NSOutputStream *)writeStream;
-
-    // Set 3-second timeout via socket native handle
-    [inputStream open];
-    [outputStream open];
-
-    // Wait for connection (max 3 seconds)
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
-    while (outputStream.streamStatus != NSStreamStatusOpen && [deadline timeIntervalSinceNow] > 0) {
-        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-        if (outputStream.streamStatus == NSStreamStatusError) break;
+    // Create socket
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        NSLog(@"[PhoneClawAPI] Proxy probe: socket() failed, defaulting to http");
+        return @"http";
     }
 
-    if (outputStream.streamStatus != NSStreamStatusOpen) {
-        [inputStream close];
-        [outputStream close];
-        CFRelease(readStream);
-        CFRelease(writeStream);
-        NSLog(@"[PhoneClawAPI] Proxy probe: connection failed to %@:%d, defaulting to http", ip, port);
+    // Set 3-second timeout for connect/send/recv
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // Connect
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host, &addr.sin_addr);
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        NSLog(@"[PhoneClawAPI] Proxy probe: connect failed to %@:%d, defaulting to http", ip, port);
         return @"http";
     }
 
     // Send SOCKS5 greeting: version=5, 1 auth method, no-auth(0x00)
-    uint8_t socks5Greeting[] = {0x05, 0x01, 0x00};
-    [outputStream write:socks5Greeting maxLength:3];
+    uint8_t greeting[] = {0x05, 0x01, 0x00};
+    send(sock, greeting, 3, 0);
 
-    // Wait for response (max 3 seconds)
-    deadline = [NSDate dateWithTimeIntervalSinceNow:3.0];
-    while (!inputStream.hasBytesAvailable && [deadline timeIntervalSinceNow] > 0) {
-        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
-        if (inputStream.streamStatus == NSStreamStatusError) break;
-    }
+    // Read response
+    uint8_t buf[2] = {0};
+    ssize_t n = recv(sock, buf, 2, 0);
+    close(sock);
 
-    NSString *result = @"http"; // Default fallback
-    if (inputStream.hasBytesAvailable) {
-        uint8_t buf[2];
-        NSInteger bytesRead = [inputStream read:buf maxLength:2];
-        if (bytesRead >= 1 && buf[0] == 0x05) {
-            result = @"socks"; // SOCKS5 server responded with version 5
-        }
-    }
-
-    [inputStream close];
-    [outputStream close];
-    CFRelease(readStream);
-    CFRelease(writeStream);
-    NSLog(@"[PhoneClawAPI] Proxy probe: %@:%d → detected %@", ip, port, result);
+    NSString *result = (n >= 1 && buf[0] == 0x05) ? @"socks" : @"http";
+    NSLog(@"[PhoneClawAPI] Proxy probe: %@:%d → %@ (recv=%zd, byte0=0x%02x)", ip, port, result, n, buf[0]);
     return result;
 }
 
