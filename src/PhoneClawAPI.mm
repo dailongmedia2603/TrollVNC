@@ -1420,11 +1420,18 @@ static BOOL _scLoaded = NO;
 }
 
 - (NSData *)handleProxyStart {
+    // Nếu proxy đang chạy, stop trước rồi restart với config mới.
+    // Đảm bảo khi đổi mode (US→VN hoặc VN→US) sing-box reload config đúng.
     if (_proxyRunning && [self isSingboxProcessAlive]) {
-        [[BulletinManager sharedManager] updateSingleBannerWithContent:
-            [NSString stringWithFormat:@"🛡️ Proxy đang chạy (PID %d)", _singboxPid]
-            badgeCount:0 userInfo:nil];
-        return jsonResponse(@{@"ok": @YES, @"message": @"Proxy already running", @"pid": @(_singboxPid)});
+        NSLog(@"[PhoneClawAPI] Proxy already running (PID %d), restarting with new config...", _singboxPid);
+        kill(_singboxPid, SIGTERM);
+        usleep(500000); // 0.5s cho graceful shutdown
+        if (_singboxPid > 0 && kill(_singboxPid, 0) == 0) {
+            kill(_singboxPid, SIGKILL);
+            usleep(200000);
+        }
+        _proxyRunning = NO;
+        _singboxPid = 0;
     }
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
