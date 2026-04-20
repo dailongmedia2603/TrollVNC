@@ -516,40 +516,52 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
             }
         });
     } else {
-        // Unicode (Vietnamese, emoji, etc): paste word by word
-        // Split by spaces, paste each word then type space between
+        // Unicode (Vietnamese, emoji, etc): paste CHARACTER-BY-CHARACTER for natural feel.
+        // iOS HID keyPress doesn't accept unicode chars, so we set clipboard + Cmd+V per char.
+        // Save clipboard ONCE at start, restore ONCE at end (avoids race conditions).
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
-            NSArray<NSString *> *words = [text componentsSeparatedByString:@" "];
 
-            for (NSUInteger w = 0; w < words.count; w++) {
-                NSString *word = words[w];
-                if (word.length == 0) continue;
+            // Iterate by composed character sequences to handle emoji + combining marks correctly.
+            NSMutableArray<NSString *> *chars = [NSMutableArray array];
+            [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                                     options:NSStringEnumerationByComposedCharacterSequences
+                                  usingBlock:^(NSString *substring, NSRange r1, NSRange r2, BOOL *stop) {
+                if (substring) [chars addObject:substring];
+            }];
 
-                // Paste the whole word via clipboard
-                dispatch_sync(dispatch_get_main_queue(), ^{
-                    [UIPasteboard generalPasteboard].string = word;
-                    [NSThread sleepForTimeInterval:0.05];
-                    [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
-                    [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
-                    [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
-                });
+            for (NSUInteger i = 0; i < chars.count; i++) {
+                NSString *ch = chars[i];
+                if (ch.length == 0) continue;
 
-                // Pause after word (like thinking between words)
-                double wordDelay = 0.3 + ((double)(arc4random_uniform(300)) / 1000.0);
-                [NSThread sleepForTimeInterval:wordDelay];
-
-                // Type space between words (not after last word)
-                if (w < words.count - 1) {
-                    dispatch_sync(dispatch_get_main_queue(), ^{
-                        [[STHIDEventGenerator sharedGenerator] keyPress:@" "];
-                    });
-                    [NSThread sleepForTimeInterval:0.1];
+                // ASCII chars within unicode text: use keyPress (faster, more native)
+                BOOL chIsASCII = YES;
+                for (NSUInteger j = 0; j < ch.length; j++) {
+                    if ([ch characterAtIndex:j] > 127) { chIsASCII = NO; break; }
                 }
+
+                if (chIsASCII) {
+                    dispatch_sync(dispatch_get_main_queue(), ^{
+                        [[STHIDEventGenerator sharedGenerator] keyPress:ch];
+                    });
+                } else {
+                    // Single unicode char paste via clipboard
+                    dispatch_sync(dispatch_get_main_queue(), ^{
+                        [UIPasteboard generalPasteboard].string = ch;
+                        [NSThread sleepForTimeInterval:0.03];
+                        [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
+                        [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
+                        [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
+                    });
+                }
+
+                // Human-like typing: 150-300ms per character (same as ASCII path)
+                double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
+                [NSThread sleepForTimeInterval:delay];
             }
 
-            // Restore clipboard after done
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Restore clipboard once after all chars done
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (savedClipboard) {
                     [UIPasteboard generalPasteboard].string = savedClipboard;
                 }
