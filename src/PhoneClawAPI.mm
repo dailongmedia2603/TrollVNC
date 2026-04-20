@@ -516,52 +516,30 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
             }
         });
     } else {
-        // Unicode (Vietnamese, emoji, etc): paste CHARACTER-BY-CHARACTER for natural feel.
-        // iOS HID keyPress doesn't accept unicode chars, so we set clipboard + Cmd+V per char.
-        // Save clipboard ONCE at start, restore ONCE at end (avoids race conditions).
+        // Unicode text (Vietnamese, emoji, ...): MUST use clipboard paste because iOS HID
+        // keyboard doesn't support non-ASCII keycodes. Single-paste the whole string for:
+        //   1) Correct text (per-char paste triggered iOS keyboard auto-spacing → broke text)
+        //   2) Minimum "Pasted from X" banners (1 per type call, not N per char)
+        //   3) Robust against autocorrect splitting words on paste boundaries
+        // Trade-off: looks like a single paste, not char-by-char typing — this is a hard
+        // limitation of typing non-ASCII text on iOS without in-app UITextInput access.
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
 
-            // Iterate by composed character sequences to handle emoji + combining marks correctly.
-            NSMutableArray<NSString *> *chars = [NSMutableArray array];
-            [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
-                                     options:NSStringEnumerationByComposedCharacterSequences
-                                  usingBlock:^(NSString *substring, NSRange r1, NSRange r2, BOOL *stop) {
-                if (substring) [chars addObject:substring];
-            }];
+            // Brief "thinking" delay before paste to feel less mechanical
+            double preDelay = 0.2 + ((double)(arc4random_uniform(200)) / 1000.0);
+            [NSThread sleepForTimeInterval:preDelay];
 
-            for (NSUInteger i = 0; i < chars.count; i++) {
-                NSString *ch = chars[i];
-                if (ch.length == 0) continue;
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [UIPasteboard generalPasteboard].string = text;
+                [NSThread sleepForTimeInterval:0.05];
+                [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
+                [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
+                [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
+            });
 
-                // ASCII chars within unicode text: use keyPress (faster, more native)
-                BOOL chIsASCII = YES;
-                for (NSUInteger j = 0; j < ch.length; j++) {
-                    if ([ch characterAtIndex:j] > 127) { chIsASCII = NO; break; }
-                }
-
-                if (chIsASCII) {
-                    dispatch_sync(dispatch_get_main_queue(), ^{
-                        [[STHIDEventGenerator sharedGenerator] keyPress:ch];
-                    });
-                } else {
-                    // Single unicode char paste via clipboard
-                    dispatch_sync(dispatch_get_main_queue(), ^{
-                        [UIPasteboard generalPasteboard].string = ch;
-                        [NSThread sleepForTimeInterval:0.03];
-                        [[STHIDEventGenerator sharedGenerator] keyDown:@"command"];
-                        [[STHIDEventGenerator sharedGenerator] keyPress:@"v"];
-                        [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
-                    });
-                }
-
-                // Human-like typing: 150-300ms per character (same as ASCII path)
-                double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
-                [NSThread sleepForTimeInterval:delay];
-            }
-
-            // Restore clipboard once after all chars done
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Restore original clipboard after the receiving app has finished pasting
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (savedClipboard) {
                     [UIPasteboard generalPasteboard].string = savedClipboard;
                 }
