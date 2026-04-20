@@ -502,6 +502,16 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
         if (ch > 127) { isASCII = NO; break; }
     }
 
+    // Block HTTP response until typing actually finishes. Use a semaphore so the
+    // background queue can signal completion. Typing on a long Telex caption can take
+    // 5-30 seconds — without this wait the script-engine fires the next node early.
+    //
+    // Cap wait to TYPE_TIMEOUT_SEC to prevent indefinite hang if something goes wrong.
+    // The HTTP handler thread runs OFF the main queue, so waiting here does NOT
+    // deadlock the inner dispatch_sync(main_queue) calls inside the work block.
+    static const NSTimeInterval TYPE_TIMEOUT_SEC = 120.0;
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+
     if (isASCII) {
         // ASCII: type character by character like a real person
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -514,15 +524,14 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
                 double delay = 0.15 + ((double)(arc4random_uniform(150)) / 1000.0);
                 [NSThread sleepForTimeInterval:delay];
             }
+            dispatch_semaphore_signal(sema);
         });
     } else {
         // Unicode text (Vietnamese, emoji, ...): MUST use clipboard paste because iOS HID
-        // keyboard doesn't support non-ASCII keycodes. Single-paste the whole string for:
-        //   1) Correct text (per-char paste triggered iOS keyboard auto-spacing → broke text)
-        //   2) Minimum "Pasted from X" banners (1 per type call, not N per char)
-        //   3) Robust against autocorrect splitting words on paste boundaries
+        // keyboard doesn't support non-ASCII keycodes. Single-paste the whole string.
         // Trade-off: looks like a single paste, not char-by-char typing — this is a hard
         // limitation of typing non-ASCII text on iOS without in-app UITextInput access.
+        // (Recommend enabling server-side Telex bypass to avoid this path entirely.)
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSString *savedClipboard = [UIPasteboard generalPasteboard].string;
 
@@ -538,7 +547,11 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
                 [[STHIDEventGenerator sharedGenerator] keyUp:@"command"];
             });
 
-            // Restore original clipboard after the receiving app has finished pasting
+            // Paste fired — signal completion now. (Restore is fire-and-forget below.)
+            dispatch_semaphore_signal(sema);
+
+            // Restore original clipboard after the receiving app has finished pasting.
+            // Runs async — the caller doesn't wait for it (no functional impact on script).
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (savedClipboard) {
                     [UIPasteboard generalPasteboard].string = savedClipboard;
@@ -547,6 +560,10 @@ static NSString *const kHeartbeatURL  = @"HeartbeatURL"; // e.g. "http://100.64.
         });
     }
 
+    long timedOut = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(TYPE_TIMEOUT_SEC * NSEC_PER_SEC)));
+    if (timedOut != 0) {
+        return jsonResponse(@{@"error": @"Type timeout (text too long or HID stuck)"});
+    }
     return jsonResponse(@{@"ok": @YES});
 }
 
