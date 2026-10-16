@@ -1684,8 +1684,8 @@ static BOOL _scLoaded = NO;
 #pragma mark - Heartbeat Push to VPS
 
 /**
- * Get the Tailscale IP address (utun interface, 100.x.x.x range).
- * Returns nil if Tailscale is not connected.
+ * Get the tunnel IP address (utun interface): Phone Agent WireGuard 10.88.x.x,
+ * or Tailscale 100.64.0.0/10. Returns nil if no tunnel is connected.
  */
 - (NSString *)getTailscaleIP {
     NSString *tailscaleIP = nil;
@@ -1703,6 +1703,12 @@ static BOOL _scLoaded = NO;
         char buf[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf));
         NSString *ip = [NSString stringWithUTF8String:buf];
+
+        // Phone Agent WireGuard (PacketTunnel trong app): 10.88.0.0/16
+        if ([ip hasPrefix:@"10.88."]) {
+            tailscaleIP = ip;
+            break;
+        }
 
         // Tailscale CGNAT range: 100.64.0.0/10 (100.64.x.x - 100.127.x.x)
         if ([ip hasPrefix:@"100."]) {

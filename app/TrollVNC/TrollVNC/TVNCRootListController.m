@@ -37,6 +37,7 @@
 
 #ifdef THEBOOTSTRAP
 #import "GitHubReleaseUpdater.h"
+#import "PAConnectViewController.h"
 #endif
 
 NS_INLINE NSString *GetDefaultRouteInterface(void) {
@@ -253,6 +254,11 @@ NS_INLINE NSString *TVNCGetEn0IPAddress(void) {
                                                                             action:nil];
     self.navigationItem.backBarButtonItem.tintColor = _primaryColor;
 
+#ifdef THEBOOTSTRAP
+    [self installServerHeader];
+    [PAConnectViewController ensureConnectedOnLaunch];
+#endif
+
     if ([self hasManagedConfiguration]) {
         return;
     }
@@ -306,7 +312,61 @@ NS_INLINE NSString *TVNCGetEn0IPAddress(void) {
     [super viewWillAppear:animated];
 
     [self updateFirstGroupAndReload:YES];
+#ifdef THEBOOTSTRAP
+    [self updateServerHeader];
+#endif
 }
+
+#ifdef THEBOOTSTRAP
+#pragma mark - Phone Agent server connection
+
+static const NSInteger kPAServerButtonTag = 0x5041;
+
+- (UITableView *)pa_tableView {
+    @try {
+        id tv = [self valueForKey:@"table"];
+        return [tv isKindOfClass:[UITableView class]] ? tv : nil;
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+- (void)installServerHeader {
+    UITableView *tv = [self pa_tableView];
+    if (!tv) return;
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width, 84)];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.tag = kPAServerButtonTag;
+    button.frame = CGRectInset(header.bounds, 16, 10);
+    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    button.backgroundColor = self.primaryColor;
+    button.layer.cornerRadius = 12;
+    button.titleLabel.numberOfLines = 2;
+    button.titleLabel.textAlignment = NSTextAlignmentCenter;
+    button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [button setTitle:@"🔗 Kết nối Server" forState:UIControlStateNormal];
+    [button addTarget:self action:@selector(openServerConnect) forControlEvents:UIControlEventTouchUpInside];
+    [header addSubview:button];
+    tv.tableHeaderView = header;
+}
+
+- (void)updateServerHeader {
+    UIButton *button = (UIButton *)[[self pa_tableView].tableHeaderView viewWithTag:kPAServerButtonTag];
+    if (![button isKindOfClass:[UIButton class]]) return;
+    __weak typeof(self) weakSelf = self;
+    [PAConnectViewController fetchStatusSummary:^(NSString *summary, BOOL connected) {
+        [button setTitle:[NSString stringWithFormat:@"🔗 Kết nối Server\n%@", summary] forState:UIControlStateNormal];
+        button.backgroundColor = connected ? [UIColor systemGreenColor] : weakSelf.primaryColor;
+    }];
+}
+
+- (void)openServerConnect {
+    PAConnectViewController *vc = [[PAConnectViewController alloc] init];
+    vc.primaryColor = self.primaryColor;
+    [self.navigationController pushViewController:vc animated:YES];
+}
+#endif
 
 - (void)showClients {
     TVNCClientListController *vc = [[TVNCClientListController alloc] init];

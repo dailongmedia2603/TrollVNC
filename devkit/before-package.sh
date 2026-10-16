@@ -45,3 +45,15 @@ rm -rf "${THEOS_STAGING_DIR:?}/Library"
 
 # Pseudo code signing
 ldid -Sapp/TrollVNC/TrollVNC/TrollVNC.entitlements "$THEOS_STAGING_DIR/Applications/TrollVNC.app"
+
+# Bundle WireGuard PacketTunnel extension (built by tunnel/build.sh) — signed
+# after the app so it keeps its own entitlements
+if [ -d "tunnel/build/PacketTunnel.appex" ]; then
+    mkdir -p "$THEOS_STAGING_DIR/Applications/TrollVNC.app/PlugIns"
+    rm -rf "$THEOS_STAGING_DIR/Applications/TrollVNC.app/PlugIns/PacketTunnel.appex"
+    cp -rp "tunnel/build/PacketTunnel.appex" "$THEOS_STAGING_DIR/Applications/TrollVNC.app/PlugIns/"
+    ldid -Stunnel/extension/entitlements.plist "$THEOS_STAGING_DIR/Applications/TrollVNC.app/PlugIns/PacketTunnel.appex/PacketTunnel"
+    echo "[before-package] PacketTunnel.appex bundled and signed"
+else
+    echo "[before-package] WARNING: tunnel/build/PacketTunnel.appex not found, server connection (WireGuard) will not work"
+fi

@@ -63,6 +63,9 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: write
+
 env:
   FINALPACKAGE: 1
   HOMEBREW_NO_AUTO_UPDATE: 1
@@ -149,6 +152,13 @@ jobs:
           otool -L "$SINGBOX"
           echo "[CI] sing-box built for iOS ($(du -h "$SINGBOX" | cut -f1))"
 
+      - name: Build WireGuard PacketTunnel extension
+        if: ${{ matrix.scheme == 'bootstrap' }}
+        run: |
+          go version
+          bash tunnel/build.sh
+          ls -la tunnel/build/PacketTunnel.appex
+
       - name: Generate Managed.plist (managed build)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.is_managed == true }}
         env:
@@ -204,6 +214,20 @@ jobs:
               cp -r packages/*.deb artifacts/packages-${{ matrix.scheme }}/
             fi
           fi
+
+      - name: Publish Phone Agent app (phoneagent-latest release)
+        if: ${{ matrix.scheme == 'bootstrap' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TIPA=$(ls artifacts/packages-bootstrap/*.tipa | head -1)
+          unzip -l "$TIPA" | grep -q "PlugIns/PacketTunnel.appex/PacketTunnel" || { echo "PacketTunnel.appex missing in $TIPA"; exit 1; }
+          cp "$TIPA" PhoneAgent.tipa
+          gh release delete phoneagent-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create phoneagent-latest PhoneAgent.tipa \
+            --title "Phone Agent (build ${GITHUB_SHA::7})" \
+            --notes "Bản cài Phone Agent cho TrollStore, có sẵn kết nối Server (WireGuard) — không cần Tailscale." \
+            --prerelease
 
       - name: Upload dSYM artifacts
         uses: actions/upload-artifact@v4

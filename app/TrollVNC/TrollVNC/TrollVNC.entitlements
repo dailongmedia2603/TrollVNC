@@ -41,6 +41,12 @@
 	<true/>
 	<key>com.apple.developer.networking.HotspotHelper</key>
 	<true/>
+	<key>application-identifier</key>
+	<string>GXZ23M5TP2.com.82flex.TrollVNCApp</string>
+	<key>com.apple.developer.networking.networkextension</key>
+	<array>
+		<string>packet-tunnel-provider</string>
+	</array>
 	<key>com.apple.developer.networking.vpn.api</key>
 	<array>
 		<string>allow-vpn</string>
