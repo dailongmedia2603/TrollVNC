@@ -334,12 +334,14 @@ static const NSInteger kPAServerButtonTag = 0x5041;
 - (void)installServerHeader {
     UITableView *tv = [self pa_tableView];
     if (!tv) return;
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tv.bounds.size.width, 84)];
+    // Table chưa layout ở viewDidLoad (width = 0) → dùng Auto Layout, không dùng frame
+    CGFloat width = tv.bounds.size.width > 0 ? tv.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 84)];
+    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.tag = kPAServerButtonTag;
-    button.frame = CGRectInset(header.bounds, 16, 10);
-    button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    button.backgroundColor = self.primaryColor;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.backgroundColor = self.primaryColor ?: [UIColor systemTealColor];
     button.layer.cornerRadius = 12;
     button.titleLabel.numberOfLines = 2;
     button.titleLabel.textAlignment = NSTextAlignmentCenter;
@@ -348,6 +350,12 @@ static const NSInteger kPAServerButtonTag = 0x5041;
     [button setTitle:@"🔗 Kết nối Server" forState:UIControlStateNormal];
     [button addTarget:self action:@selector(openServerConnect) forControlEvents:UIControlEventTouchUpInside];
     [header addSubview:button];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:16],
+        [button.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16],
+        [button.topAnchor constraintEqualToAnchor:header.topAnchor constant:12],
+        [button.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-8],
+    ]];
     tv.tableHeaderView = header;
 }
 
