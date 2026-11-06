@@ -455,7 +455,11 @@ static void parseDaemonOptions(void) {
     }
 
     if (!prefs) {
-        TVLog(@"-daemon: no preferences found for domain com.82flex.trollvnc");
+        // Fresh install: Settings has never been touched, so no prefs domain exists yet.
+        // Still apply the HttpPort default, otherwise the API falls back to VNC port + 1
+        // (5902) while the dashboard and the Connect screen expect 8081.
+        TVLog(@"-daemon: no preferences found for domain com.82flex.trollvnc; using defaults");
+        gHttpPort = 8080;
         return;
     }
 
